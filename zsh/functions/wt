@@ -1,0 +1,26 @@
+emulate -L zsh
+
+local target="${1:-}"
+local target_path
+local dir="$PWD"
+
+while [[ "$dir" != "/" ]]; do
+  if [[ -d "$dir/.worktrees" ]]; then
+    break
+  fi
+  dir=${dir:h}
+done
+
+if [[ -z "$target" ]]; then
+  if [[ "$dir" == "/" ]]; then
+    print -u2 "Could not find .worktrees directory in parent hierarchy."
+    return 1
+  fi
+  cd "$dir" || return 1
+  pwd
+  return 0
+fi
+
+target_path=$(command wt __path "$target") || return 1
+cd "$target_path" || return 1
+pwd

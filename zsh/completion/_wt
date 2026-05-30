@@ -1,0 +1,4 @@
+#compdef wt
+
+eval "$(command wt --zsh-completion 2>/dev/null)"
+_wt "$@"
