@@ -12,11 +12,16 @@ while [[ "$dir" != "/" ]]; do
 done
 
 if [[ -z "$target" ]]; then
-  if [[ "$dir" == "/" ]]; then
-    print -u2 "Could not find .worktrees directory in parent hierarchy."
-    return 1
+  if ! command -v fzf >/dev/null 2>&1; then
+    command wt
+    return $?
   fi
-  cd "$dir" || return 1
+
+  target_path=$(command wt) || return $?
+  if [[ -z "$target_path" ]]; then
+    return 0
+  fi
+  cd "$target_path" || return 1
   pwd
   return 0
 fi

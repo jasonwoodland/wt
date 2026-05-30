@@ -6,10 +6,13 @@ GONE_BRANCHES=""
 
 usage() {
   cat <<'EOF'
-Usage: wt --help
+Usage: wt
+       wt --help
        wt --zsh-completion
        wt __list
        wt __path <branch>
+
+With no arguments, wt opens an fzf picker when fzf is available.
 
 wt is normally used through its zsh autoload function so it can change the
 current shell directory. The executable provides shared data for completion and
@@ -215,6 +218,44 @@ resolve_path() {
   return 1
 }
 
+format_rows() {
+  awk -F '\t' '
+    {
+      if (length($1) > w1) w1 = length($1)
+      rows[NR] = $0
+    }
+    END {
+      for (i = 1; i <= NR; i++) {
+        split(rows[i], f, "\t")
+        label = f[4]
+        if (label == "-") label = ""
+        printf "%-" w1 "s", f[1]
+        if (label != "") printf "  [%s]", label
+        printf "\n"
+      }
+    }
+  '
+}
+
+pick_candidate() {
+  local rows selection branch
+
+  rows=$(list_candidates)
+  if [ -z "$rows" ]; then
+    echo "No worktrees or local branches found." >&2
+    return 1
+  fi
+
+  if command -v fzf >/dev/null 2>&1; then
+    selection=$(printf '%s\n' "$rows" | format_rows | fzf --height=~50%) || return 130
+    branch=$(printf '%s\n' "$selection" | awk '{ print $1 }')
+    [ -n "$branch" ] || return 1
+    resolve_path "$branch"
+  else
+    printf '%s\n' "$rows" | format_rows
+  fi
+}
+
 print_zsh_completion() {
   cat <<'EOF'
 #compdef wt
@@ -286,7 +327,7 @@ case "${1:-}" in
     resolve_path "${1:-}"
     ;;
   "")
-    usage
+    pick_candidate
     ;;
   *)
     usage >&2

@@ -8,6 +8,22 @@ local entry_display = require("telescope.pickers.entry_display")
 
 local M = {}
 
+local function wt_executable()
+	local path = vim.fn.exepath("wt")
+	if path ~= "" then
+		return path
+	end
+
+	local source = debug.getinfo(1, "S").source:sub(2)
+	local plugin_root = vim.fn.fnamemodify(source, ":p:h:h:h")
+	local bundled = plugin_root .. "/wt"
+	if vim.fn.executable(bundled) == 1 then
+		return bundled
+	end
+
+	return nil, "'wt' is not executable"
+end
+
 local function command_output(args)
 	local output = vim.fn.system(args)
 	if vim.v.shell_error ~= 0 then
@@ -44,7 +60,12 @@ local function parse_rows(output)
 end
 
 local function get_candidates()
-	local output, err = command_output({ "wt", "__list" })
+	local wt, wt_err = wt_executable()
+	if not wt then
+		return nil, wt_err
+	end
+
+	local output, err = command_output({ wt, "__list" })
 	if not output then
 		return nil, err
 	end
@@ -52,11 +73,26 @@ local function get_candidates()
 end
 
 local function resolve_path(branch)
-	local output, err = command_output({ "wt", "__path", branch })
+	local wt, wt_err = wt_executable()
+	if not wt then
+		return nil, wt_err
+	end
+
+	local output, err = command_output({ wt, "__path", branch })
 	if not output then
 		return nil, err
 	end
-	return vim.trim(output), nil
+
+	local path
+	for line in output:gmatch("[^\r\n]+") do
+		path = vim.trim(line)
+	end
+
+	if not path or path == "" then
+		return nil, "Could not resolve worktree path"
+	end
+
+	return path, nil
 end
 
 local function edit_project_file(cwd, command)
@@ -143,6 +179,22 @@ local function resolve_and_find_files(entry)
 	edit_project_file(path)
 end
 
+local function remove_worktree(entry)
+	if entry.kind ~= "worktree" then
+		vim.notify("No worktree exists for branch '" .. entry.branch .. "'", vim.log.levels.WARN)
+		return false
+	end
+
+	local output, err = command_output({ "git", "-C", entry.root, "worktree", "remove", entry.path })
+	if not output then
+		vim.notify(err ~= "" and err or "Could not remove worktree", vim.log.levels.ERROR)
+		return false
+	end
+
+	vim.notify("Removed worktree " .. entry.path, vim.log.levels.INFO)
+	return true
+end
+
 function M.pick(opts)
 	opts = opts or {}
 	local candidates, err = get_candidates()
@@ -210,10 +262,10 @@ function M.pick(opts)
 						branch = entry.branch,
 						path = entry.path,
 						display = function()
-							local label = entry.label ~= "" and ("[" .. entry.label .. "]") or ""
+							-- local label = entry.label ~= "" and ("[" .. entry.label .. "]") or ""
 							return displayer({
 								entry.branch,
-								{ label, "TelescopeResultsComment" },
+								{ entry.label, "TelescopeResultsComment" },
 							})
 						end,
 						ordinal = entry.branch .. " " .. entry.path .. " " .. entry.label,
@@ -257,6 +309,15 @@ function M.pick(opts)
 						resolve_and_find_files(selection.value)
 					end
 				end)
+				local delete_selection = function()
+					local selection = action_state.get_selected_entry()
+					if selection and remove_worktree(selection.value) then
+						actions.close(prompt_bufnr)
+						M.pick(opts)
+					end
+				end
+				map("i", "<C-d>", delete_selection)
+				map("n", "<C-d>", delete_selection)
 				return true
 			end,
 		})
