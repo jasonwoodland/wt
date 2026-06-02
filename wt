@@ -366,9 +366,29 @@ print_zsh_completion() {
 _wt() {
   local -a values labels
   local -a active_values active_labels normal_values normal_labels merged_values merged_labels gone_values gone_labels
-  local line branch worktree_path kind label sort formatted_label display_label display_path root_path
-  local -a fields
-  local branch_width path_width max_branch_width=0 max_path_width=0
+  local line branch worktree_path kind label sort formatted_label display_label display_path root_path cur
+  local -a fields filtered_values filtered_labels
+  local branch_width path_width max_branch_width=0 max_path_width=0 i
+
+  _wt_fuzzy_match() {
+    local needle="${1:l}" haystack="${2:l}" char
+    local i
+
+    [[ -n "$needle" ]] || return 0
+
+    for ((i = 1; i <= ${#needle}; i++)); do
+      char="${needle[i]}"
+      if [[ "$haystack" == *"$char"* ]]; then
+        haystack="${haystack#*"$char"}"
+      else
+        return 1
+      fi
+    done
+
+    return 0
+  }
+
+  cur="${words[CURRENT]}"
 
   while IFS= read -r line; do
     fields=("${(@ps:\t:)line}")
@@ -452,7 +472,18 @@ _wt() {
   values=("${active_values[@]}" "${normal_values[@]}" "${merged_values[@]}" "${gone_values[@]}")
   labels=("${active_labels[@]}" "${normal_labels[@]}" "${merged_labels[@]}" "${gone_labels[@]}")
 
-  (( ${#values} > 0 )) && compadd -Q -V wt-branches -d labels -l -- "${values[@]}"
+  if [[ -n "$cur" ]]; then
+    for ((i = 1; i <= ${#values}; i++)); do
+      if _wt_fuzzy_match "$cur" "${values[i]}"; then
+        filtered_values+=("${values[i]}")
+        filtered_labels+=("${labels[i]}")
+      fi
+    done
+
+    (( ${#filtered_values} > 0 )) && compadd -U -Q -V wt-branches -d filtered_labels -l -- "${filtered_values[@]}"
+  else
+    (( ${#values} > 0 )) && compadd -Q -V wt-branches -d labels -l -- "${values[@]}"
+  fi
 }
 
 compdef _wt wt
