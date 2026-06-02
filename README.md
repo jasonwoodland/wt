@@ -1,14 +1,15 @@
 # wt
 
-Switch between Git worktrees stored under `.worktrees/<branch>` and pick them from Telescope.
+Switch between Git worktrees stored under `.worktrees/<branch>` and pick them from Telescope. Repos without `.worktrees` are supported; the directory is created lazily when a worktree is added.
 
 `wt` follows the same standalone repo style as [`nvs`](../nvs), with one shell-specific difference: the interactive `wt` command is a zsh autoload function so it can change the current shell directory. The root executable provides shared data for completion and Neovim.
 
 ## Shell usage
 
 ```sh
-wt              # cd to the repo root that owns .worktrees
-wt <branch>     # cd to .worktrees/<branch>, creating it from a local branch if needed
+wt              # open the interactive picker when fzf is available
+wt -            # cd to the repo root that owns .worktrees
+wt <branch>     # cd to the branch's existing worktree, or create .worktrees/<branch>
 ```
 
 ## Installation
@@ -26,19 +27,22 @@ The autoloaded function shadows the executable for normal shell use. Use `comman
 
 Completion is installed from `zsh/completion/_wt` via `fpath`/`compinit`. It displays existing worktrees first, then normal branches, merged branches, and gone-upstream branches.
 
+Displayed rows use three columns: branch name, existing worktree path, and an optional marker such as `[root]` or `[merged]`. Paths are displayed relative to the repo root; branches without an existing worktree leave the path column blank.
+
 Example labels:
 
 ```text
-feature-a  [worktree]
-old-work   [worktree, gone]
-merged     [merged]
-gone       [gone]
+main       .                    [root]
+feature-a  .worktrees/feature-a
+new-branch
+merged                          [merged]
 ```
 
 Git terms:
 
-- `[gone]`: the branch's upstream is gone, matching Git's `%(upstream:track)`/`git branch -vv` terminology.
+- `[root]`: the repository root worktree, available directly with `wt -`.
 - `[merged]`: the branch is merged into `origin/HEAD`, falling back to local `main` or `master`.
+- Gone-upstream branches are still sorted after merged branches, but they are not marked in the display.
 
 ## Executable helper
 
@@ -49,11 +53,13 @@ command wt __list
 command wt __path <branch>
 ```
 
-`__list` prints tab-separated rows for integrations. A label of `-` means no display label:
+`__list` prints tab-separated rows for integrations. Empty fields are left blank:
 
 ```text
 branch<TAB>path<TAB>kind<TAB>label<TAB>sort
 ```
+
+`path` and `kind` are set only for existing worktrees/root rows; local branches without an existing worktree leave both fields empty.
 
 ## Telescope picker
 
@@ -61,7 +67,7 @@ branch<TAB>path<TAB>kind<TAB>label<TAB>sort
 require("wt").setup({ key = "<Space>w" })
 ```
 
-The picker lists existing worktrees and local branches. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
+The picker lists existing worktrees and local branches with the same three-column branch/path/marker format as the shell. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
 
 Actions mirror the dotfiles projects picker:
 

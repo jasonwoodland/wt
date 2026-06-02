@@ -7,12 +7,14 @@ GONE_BRANCHES=""
 usage() {
   cat <<'EOF'
 Usage: wt
+       wt -
        wt --help
        wt --zsh-completion
        wt __list
        wt __path <branch>
 
 With no arguments, wt opens an fzf picker when fzf is available.
+Use "wt -" to resolve the repo root that owns .worktrees.
 
 wt is normally used through its zsh autoload function so it can change the
 current shell directory. The executable provides shared data for completion and
@@ -22,6 +24,8 @@ EOF
 
 find_worktrees_root() {
   local dir="${1:-$PWD}"
+  local git_root
+
   while [ "$dir" != "/" ]; do
     if [ -d "$dir/.worktrees" ]; then
       printf '%s\n' "$dir"
@@ -29,6 +33,12 @@ find_worktrees_root() {
     fi
     dir=$(dirname "$dir")
   done
+
+  git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [ -n "$git_root" ]; then
+    printf '%s\n' "$git_root"
+    return 0
+  fi
 
   return 1
 }
@@ -82,31 +92,86 @@ branch_label() {
   printf '%s\n' "$label"
 }
 
+root_branch() {
+  git branch --show-current 2>/dev/null || true
+}
+
+worktree_path_for_branch() {
+  local target="$1"
+
+  git worktree list --porcelain 2>/dev/null |
+    awk -v target="$target" '
+      function flush() {
+        if (path != "" && branch == target) {
+          print path
+          found = 1
+          exit
+        }
+        path = ""
+        branch = ""
+      }
+      /^worktree / {
+        flush()
+        path = substr($0, 10)
+        branch = ""
+        next
+      }
+      /^branch refs\/heads\// {
+        branch = substr($0, 19)
+        next
+      }
+      /^$/ { flush() }
+      END { if (!found) flush(); if (found) exit 0 }
+    '
+}
+
 list_candidates() {
-  local root default_branch local_default_branch branch path label label_field sort kind row seen_branches
-  local -a worktree_branches branches normal_rows merged_rows gone_rows
+  local root root_branch_name default_branch local_default_branch branch path label label_field sort kind row seen_branches
+  local -a worktree_rows branches normal_rows merged_rows gone_rows
 
   seen_branches=""
 
   root=$(find_worktrees_root) || {
-    echo "Could not find .worktrees directory in parent hierarchy." >&2
+    echo "Could not find .worktrees directory or Git repository root." >&2
     return 1
   }
+  root=$(cd "$root" && pwd -P)
 
   cd "$root"
+  root_branch_name=$(root_branch)
 
-  while IFS= read -r branch; do
-    [ -n "$branch" ] || continue
-    worktree_branches+=("$branch")
+  if [ -n "$root_branch_name" ]; then
+    printf '%s\t%s\t%s\t%s\t%s\n' "$root_branch_name" "$root" root root 0
+    seen_branches="${seen_branches}${root_branch_name}"$'\n'
+  fi
+
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    worktree_rows+=("$row")
   done < <(
     git worktree list --porcelain 2>/dev/null |
       awk '
-        /^worktree / {
-          path = substr($0, 10)
-          marker = "/.worktrees/"
-          idx = index(path, marker)
-          if (idx > 0) print substr(path, idx + length(marker))
+        function flush() {
+          if (path != "" && branch != "") {
+            marker = "/.worktrees/"
+            idx = index(path, marker)
+            if (idx > 0) print branch "\t" path
+          }
+          path = ""
+          branch = ""
         }
+        /^worktree / {
+          flush()
+          path = substr($0, 10)
+          branch = ""
+          next
+        }
+        /^branch refs\/heads\// {
+          branch = substr($0, 19)
+          next
+        }
+        /^$/ { flush() }
+        END { flush() }
       '
   )
 
@@ -134,8 +199,12 @@ list_candidates() {
     fi
   done < <(git for-each-ref --format='%(refname:short)|%(upstream:track)' refs/heads/ 2>/dev/null)
 
-  for branch in "${worktree_branches[@]}"; do
+  for row in "${worktree_rows[@]}"; do
+    [ -n "$row" ] || continue
+    branch=${row%%$'\t'*}
+    path=${row#*$'\t'}
     [ -n "$branch" ] || continue
+    [ -n "$path" ] || continue
     list_contains "$branch" "$seen_branches" && continue
     seen_branches="${seen_branches}${branch}"$'\n'
 
@@ -147,7 +216,6 @@ list_candidates() {
       label="$label, merged"
     fi
 
-    path="$root/.worktrees/$branch"
     printf '%s\t%s\t%s\t%s\t%s\n' "$branch" "$path" worktree "$label" 0
   done
 
@@ -157,7 +225,7 @@ list_candidates() {
     seen_branches="${seen_branches}${branch}"$'\n'
 
     label=$(branch_label "$branch" "$local_default_branch")
-    kind="branch"
+    kind=""
     sort=1
     if [ -n "$label" ]; then
       if list_contains "$branch" "$GONE_BRANCHES"; then
@@ -167,8 +235,8 @@ list_candidates() {
       fi
     fi
 
-    path="$root/.worktrees/$branch"
-    label_field=${label:-'-'}
+    path=""
+    label_field="$label"
     row=$(printf '%s\t%s\t%s\t%s\t%s' "$branch" "$path" "$kind" "$label_field" "$sort")
     case "$sort" in
       2) merged_rows+=("$row") ;;
@@ -185,7 +253,7 @@ list_candidates() {
 
 resolve_path() {
   local target="${1:-}"
-  local root worktree_dir worktree_parent
+  local root worktree_dir worktree_parent path
 
   if [ -z "$target" ]; then
     echo "Usage: wt __path <branch>" >&2
@@ -193,12 +261,25 @@ resolve_path() {
   fi
 
   root=$(find_worktrees_root) || {
-    echo "Could not find .worktrees directory in parent hierarchy." >&2
+    echo "Could not find .worktrees directory or Git repository root." >&2
     return 1
   }
+  root=$(cd "$root" && pwd -P)
 
   cd "$root"
+
+  if [ "$target" = "-" ]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+
   worktree_dir="$root/.worktrees/$target"
+
+  path=$(worktree_path_for_branch "$target")
+  if [ -n "$path" ]; then
+    printf '%s\n' "$path"
+    return 0
+  fi
 
   if [ -d "$worktree_dir" ]; then
     printf '%s\n' "$worktree_dir"
@@ -220,18 +301,40 @@ resolve_path() {
 
 format_rows() {
   awk -F '\t' '
+    function display_label(label) {
+      if (label ~ /(^|, )root($|,)/) return "[root]"
+      if (label ~ /(^|, )merged($|,)/) return "[merged]"
+      return ""
+    }
+    function display_path(path) {
+      if (path == "") return ""
+      if (root_path != "" && path == root_path) return "."
+      if (root_path != "" && index(path, root_path "/") == 1) return substr(path, length(root_path) + 2)
+      return path
+    }
     {
-      if (length($1) > w1) w1 = length($1)
       rows[NR] = $0
+      if ($3 == "root") root_path = $2
+      if (length($1) > w1) w1 = length($1)
     }
     END {
       for (i = 1; i <= NR; i++) {
         split(rows[i], f, "\t")
-        label = f[4]
-        if (label == "-") label = ""
-        printf "%-" w1 "s", f[1]
-        if (label != "") printf "  [%s]", label
-        printf "\n"
+        shown_path[i] = display_path(f[2])
+        if (length(shown_path[i]) > w2) w2 = length(shown_path[i])
+      }
+      for (i = 1; i <= NR; i++) {
+        split(rows[i], f, "\t")
+        label = display_label(f[4])
+        if (shown_path[i] == "" && label != "") {
+          printf "%-" w1 "s  %-" w2 "s  %s\n", f[1], "", label
+        } else if (shown_path[i] == "") {
+          print f[1]
+        } else if (label != "") {
+          printf "%-" w1 "s  %-" w2 "s  %s\n", f[1], shown_path[i], label
+        } else {
+          printf "%-" w1 "s  %s\n", f[1], shown_path[i]
+        }
       }
     }
   '
@@ -263,23 +366,67 @@ print_zsh_completion() {
 _wt() {
   local -a values labels
   local -a active_values active_labels normal_values normal_labels merged_values merged_labels gone_values gone_labels
-  local branch worktree_path kind label sort formatted_label
-  local branch_width max_width=0
+  local line branch worktree_path kind label sort formatted_label display_label display_path root_path
+  local -a fields
+  local branch_width path_width max_branch_width=0 max_path_width=0
 
-  while IFS=$'\t' read -r branch worktree_path kind label sort; do
+  while IFS= read -r line; do
+    fields=("${(@ps:\t:)line}")
+    branch="$fields[1]"
+    worktree_path="$fields[2]"
+    kind="$fields[3]"
     [[ -n "$branch" ]] || continue
-    branch_width=${#branch}
-    (( branch_width > max_width )) && max_width=$branch_width
+    [[ "$kind" == "root" ]] && root_path="$worktree_path"
   done < <(command wt __list 2>/dev/null)
 
-  while IFS=$'\t' read -r branch worktree_path kind label sort; do
+  while IFS= read -r line; do
+    fields=("${(@ps:\t:)line}")
+    branch="$fields[1]"
+    worktree_path="$fields[2]"
+    [[ -n "$branch" ]] || continue
+    display_path="$worktree_path"
+    if [[ -n "$root_path" && "$worktree_path" == "$root_path" ]]; then
+      display_path="."
+    elif [[ -n "$root_path" && "$worktree_path" == "$root_path"/* ]]; then
+      display_path="${worktree_path#$root_path/}"
+    fi
+    branch_width=${#branch}
+    path_width=${#display_path}
+    (( branch_width > max_branch_width )) && max_branch_width=$branch_width
+    (( path_width > max_path_width )) && max_path_width=$path_width
+  done < <(command wt __list 2>/dev/null)
+
+  while IFS= read -r line; do
+    fields=("${(@ps:\t:)line}")
+    branch="$fields[1]"
+    worktree_path="$fields[2]"
+    kind="$fields[3]"
+    label="$fields[4]"
+    sort="$fields[5]"
     [[ -n "$branch" ]] || continue
 
-    [[ "$label" == "-" ]] && label=""
-    if [[ -n "$label" ]]; then
-      formatted_label=$(printf "%-${max_width}s  [%s]" "$branch" "$label")
-    else
+    display_label=""
+    if [[ "$label" == *root* ]]; then
+      display_label="[root]"
+    elif [[ "$label" == *merged* ]]; then
+      display_label="[merged]"
+    fi
+
+    display_path="$worktree_path"
+    if [[ -n "$root_path" && "$worktree_path" == "$root_path" ]]; then
+      display_path="."
+    elif [[ -n "$root_path" && "$worktree_path" == "$root_path"/* ]]; then
+      display_path="${worktree_path#$root_path/}"
+    fi
+
+    if [[ -z "$display_path" && -n "$display_label" ]]; then
+      formatted_label=$(printf "%-${max_branch_width}s  %-${max_path_width}s  %s" "$branch" "" "$display_label")
+    elif [[ -z "$display_path" ]]; then
       formatted_label="$branch"
+    elif [[ -n "$display_label" ]]; then
+      formatted_label=$(printf "%-${max_branch_width}s  %-${max_path_width}s  %s" "$branch" "$display_path" "$display_label")
+    else
+      formatted_label=$(printf "%-${max_branch_width}s  %s" "$branch" "$display_path")
     fi
 
     case "$sort" in
@@ -305,7 +452,7 @@ _wt() {
   values=("${active_values[@]}" "${normal_values[@]}" "${merged_values[@]}" "${gone_values[@]}")
   labels=("${active_labels[@]}" "${normal_labels[@]}" "${merged_labels[@]}" "${gone_labels[@]}")
 
-  (( ${#values} > 0 )) && compadd -Q -V wt-branches -d labels -- "${values[@]}"
+  (( ${#values} > 0 )) && compadd -Q -V wt-branches -d labels -l -- "${values[@]}"
 }
 
 compdef _wt wt

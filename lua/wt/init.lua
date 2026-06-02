@@ -32,8 +32,19 @@ local function command_output(args)
 	return output, nil
 end
 
+local function display_label(label)
+	if label and label:find("root", 1, true) then
+		return "[root]"
+	end
+	if label and label:find("merged", 1, true) then
+		return "[merged]"
+	end
+	return ""
+end
+
 local function parse_rows(output)
 	local rows = {}
+	local root_path
 	if not output or output == "" then
 		return rows
 	end
@@ -44,15 +55,30 @@ local function parse_rows(output)
 			if label == "-" then
 				label = ""
 			end
-			local root = path:match("^(.-)/%.worktrees/") or vim.fn.getcwd()
+			if kind == "root" and path ~= "" then
+				root_path = path
+			end
 			table.insert(rows, {
 				branch = branch,
 				path = path,
-				root = root,
 				kind = kind,
 				label = label,
 				sort = tonumber(sort) or 1,
 			})
+		end
+	end
+
+	for _, row in ipairs(rows) do
+		local root = root_path or row.path:match("^(.-)/%.worktrees/") or vim.fn.getcwd()
+		row.root = root
+		if row.path == "" then
+			row.display_path = ""
+		elseif row.path == root then
+			row.display_path = "."
+		elseif vim.startswith(row.path, root .. "/") then
+			row.display_path = row.path:sub(#root + 2)
+		else
+			row.display_path = row.path
 		end
 	end
 
@@ -181,7 +207,11 @@ end
 
 local function remove_worktree(entry)
 	if entry.kind ~= "worktree" then
-		vim.notify("No worktree exists for branch '" .. entry.branch .. "'", vim.log.levels.WARN)
+		if entry.kind == "root" then
+			vim.notify("Cannot remove the repo root worktree", vim.log.levels.WARN)
+		else
+			vim.notify("No worktree exists for branch '" .. entry.branch .. "'", vim.log.levels.WARN)
+		end
 		return false
 	end
 
@@ -208,8 +238,10 @@ function M.pick(opts)
 	end
 
 	local max_branch_width = 0
+	local max_path_width = 0
 	for _, candidate in ipairs(candidates) do
 		max_branch_width = math.max(max_branch_width, #candidate.branch)
+		max_path_width = math.max(max_path_width, #candidate.display_path)
 	end
 
 	pickers
@@ -253,6 +285,7 @@ function M.pick(opts)
 						separator = "  ",
 						items = {
 							{ width = max_branch_width },
+							{ width = max_path_width },
 							{ remaining = true },
 						},
 					})
@@ -261,14 +294,15 @@ function M.pick(opts)
 						value = entry,
 						branch = entry.branch,
 						path = entry.path,
+						display_path = entry.display_path,
 						display = function()
-							-- local label = entry.label ~= "" and ("[" .. entry.label .. "]") or ""
 							return displayer({
 								entry.branch,
-								{ entry.label, "TelescopeResultsComment" },
+								{ entry.display_path, "TelescopeResultsComment" },
+								{ display_label(entry.label), "TelescopeResultsComment" },
 							})
 						end,
-						ordinal = entry.branch .. " " .. entry.path .. " " .. entry.label,
+						ordinal = entry.branch .. " " .. entry.path .. " " .. display_label(entry.label),
 					}
 				end,
 			}),
