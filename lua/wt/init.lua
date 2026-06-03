@@ -36,9 +36,6 @@ local function display_label(label)
 	if label and label:find("root", 1, true) then
 		return "[root]"
 	end
-	if label and label:find("merged", 1, true) then
-		return "[merged]"
-	end
 	return ""
 end
 

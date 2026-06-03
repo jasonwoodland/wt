@@ -25,9 +25,9 @@ The autoloaded function shadows the executable for normal shell use. Use `comman
 
 ## Completion
 
-Completion is installed from `zsh/completion/_wt` via `fpath`/`compinit`. It displays existing worktrees first, then normal branches, merged branches, and gone-upstream branches.
+Completion is installed from `zsh/completion/_wt` via `fpath`/`compinit`. It displays existing worktrees first, then local branches.
 
-Displayed rows use three columns: branch name, existing worktree path, and an optional marker such as `[root]` or `[merged]`. Paths are displayed relative to the repo root; branches without an existing worktree leave the path column blank.
+Displayed rows use three columns: branch name, existing worktree path, and an optional marker such as `[root]`. Paths are displayed relative to the repo root; branches without an existing worktree leave the path column blank.
 
 Example labels:
 
@@ -35,19 +35,18 @@ Example labels:
 main       .                    [root]
 feature-a  .worktrees/feature-a
 new-branch
-merged                          [merged]
 ```
 
 Git terms:
 
 - `[root]`: the repository root worktree, available directly with `wt -`.
-- `[merged]`: the branch is merged into `origin/HEAD`, falling back to local `main` or `master`.
-- Gone-upstream branches are still sorted after merged branches, but they are not marked in the display.
 
 ## Executable helper
 
 ```sh
 command wt --help
+command wt -
+command wt <branch>
 command wt --zsh-completion
 command wt __list
 command wt __path <branch>
