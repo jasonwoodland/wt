@@ -8,6 +8,237 @@ local entry_display = require("telescope.pickers.entry_display")
 
 local M = {}
 
+local git_log_preview_ns = vim.api.nvim_create_namespace("wt_git_log_preview")
+
+local ansi_groups = {
+	["30"] = "WtAnsiBlack",
+	["31"] = "WtAnsiRed",
+	["32"] = "WtAnsiGreen",
+	["33"] = "WtAnsiYellow",
+	["34"] = "WtAnsiBlue",
+	["35"] = "WtAnsiMagenta",
+	["36"] = "WtAnsiCyan",
+	["37"] = "WtAnsiWhite",
+	["90"] = "WtAnsiBrightBlack",
+	["91"] = "WtAnsiBrightRed",
+	["92"] = "WtAnsiBrightGreen",
+	["93"] = "WtAnsiBrightYellow",
+	["94"] = "WtAnsiBrightBlue",
+	["95"] = "WtAnsiBrightMagenta",
+	["96"] = "WtAnsiBrightCyan",
+	["97"] = "WtAnsiBrightWhite",
+}
+
+local ansi_colors = {
+	WtAnsiBlack = { 0, "#000000" },
+	WtAnsiRed = { 1, "#cc241d" },
+	WtAnsiGreen = { 2, "#98971a" },
+	WtAnsiYellow = { 3, "#d79921" },
+	WtAnsiBlue = { 4, "#458588" },
+	WtAnsiMagenta = { 5, "#b16286" },
+	WtAnsiCyan = { 6, "#689d6a" },
+	WtAnsiWhite = { 7, "#a89984" },
+	WtAnsiBrightBlack = { 8, "#928374" },
+	WtAnsiBrightRed = { 9, "#fb4934" },
+	WtAnsiBrightGreen = { 10, "#b8bb26" },
+	WtAnsiBrightYellow = { 11, "#fabd2f" },
+	WtAnsiBrightBlue = { 12, "#83a598" },
+	WtAnsiBrightMagenta = { 13, "#d3869b" },
+	WtAnsiBrightCyan = { 14, "#8ec07c" },
+	WtAnsiBrightWhite = { 15, "#ebdbb2" },
+}
+
+local function ensure_ansi_groups()
+	for group, color in pairs(ansi_colors) do
+		local terminal_color = vim.g["terminal_color_" .. color[1]]
+		if type(terminal_color) ~= "string" or terminal_color == "" then
+			terminal_color = color[2]
+		end
+		vim.api.nvim_set_hl(0, group, { fg = terminal_color })
+	end
+end
+
+local function ansi_group_for_codes(codes, current)
+	if codes == "" then
+		return nil
+	end
+
+	local group = current
+	for code in codes:gmatch("[^;]+") do
+		if code == "0" or code == "00" or code == "39" then
+			group = nil
+		elseif ansi_groups[code] then
+			group = ansi_groups[code]
+		end
+	end
+	return group
+end
+
+local function parse_ansi_line(line)
+	local chunks = {}
+	local highlights = {}
+	local group
+	local col = 0
+	local pos = 1
+
+	while true do
+		local esc_start, esc_end, codes = line:find("\27%[([0-9;]*)m", pos)
+		local chunk = esc_start and line:sub(pos, esc_start - 1) or line:sub(pos)
+		if chunk ~= "" then
+			table.insert(chunks, chunk)
+			if group then
+				table.insert(highlights, { col, col + #chunk, group })
+			end
+			col = col + #chunk
+		end
+		if not esc_start then
+			break
+		end
+		group = ansi_group_for_codes(codes, group)
+		pos = esc_end + 1
+	end
+
+	return table.concat(chunks), highlights
+end
+
+local function parse_ansi_output(output)
+	local lines = vim.split(output, "\n", { plain = true })
+	if lines[#lines] == "" then
+		table.remove(lines)
+	end
+
+	local parsed_lines = {}
+	local line_highlights = {}
+	for _, line in ipairs(lines) do
+		local parsed_line, highlights = parse_ansi_line(line)
+		table.insert(parsed_lines, parsed_line)
+		table.insert(line_highlights, highlights)
+	end
+	return parsed_lines, line_highlights
+end
+
+local function set_preview_lines(bufnr, lines, line_highlights)
+	ensure_ansi_groups()
+	vim.api.nvim_buf_clear_namespace(bufnr, git_log_preview_ns, 0, -1)
+	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+	for line_number, highlights in ipairs(line_highlights or {}) do
+		for _, highlight in ipairs(highlights) do
+			vim.api.nvim_buf_set_extmark(bufnr, git_log_preview_ns, line_number - 1, highlight[1], {
+				end_col = highlight[2],
+				hl_group = highlight[3],
+				priority = 200,
+			})
+		end
+	end
+end
+
+local function configure_preview_window(winid)
+	local function apply()
+		if winid and vim.api.nvim_win_is_valid(winid) then
+			vim.wo[winid].number = false
+			vim.wo[winid].relativenumber = false
+			vim.wo[winid].cursorline = false
+			vim.wo[winid].signcolumn = "no"
+		end
+	end
+
+	apply()
+	vim.schedule(apply)
+	vim.schedule(function()
+		vim.schedule(apply)
+	end)
+end
+
+local function preview_is_current(bufnr, winid)
+	return vim.api.nvim_buf_is_valid(bufnr)
+		and (not winid or not vim.api.nvim_win_is_valid(winid) or vim.api.nvim_win_get_buf(winid) == bufnr)
+end
+
+local function lines_to_output(lines)
+	if not lines then
+		return ""
+	end
+	return table.concat(lines, "\n")
+end
+
+local function mark_preview_loaded(bufnr)
+	if vim.api.nvim_buf_is_valid(bufnr) then
+		vim.b[bufnr].wt_git_log_loading = false
+		vim.b[bufnr].wt_git_log_loaded = true
+	end
+end
+
+local function preview_git_log(bufnr, winid, root, branch)
+	if vim.b[bufnr].wt_git_log_loaded or vim.b[bufnr].wt_git_log_loading then
+		return
+	end
+
+	vim.b[bufnr].wt_git_log_loading = true
+	vim.defer_fn(function()
+		if not preview_is_current(bufnr, winid) then
+			if vim.api.nvim_buf_is_valid(bufnr) then
+				vim.b[bufnr].wt_git_log_loading = false
+			end
+			return
+		end
+
+		local stdout = {}
+		local stderr = {}
+		local job_id = vim.fn.jobstart({
+			"git",
+			"-C",
+			root,
+			"--no-pager",
+			"log",
+			"--graph",
+			"--color=always",
+			"--decorate",
+			"--max-count=200",
+			branch,
+			"--",
+		}, {
+			stdout_buffered = true,
+			stderr_buffered = true,
+			on_stdout = function(_, data)
+				stdout = data or {}
+			end,
+			on_stderr = function(_, data)
+				stderr = data or {}
+			end,
+			on_exit = function(_, code)
+				vim.schedule(function()
+					if not vim.api.nvim_buf_is_valid(bufnr) then
+						return
+					end
+
+					local output = lines_to_output(stdout)
+					if code ~= 0 then
+						local message = vim.trim(lines_to_output(stderr))
+						if message == "" then
+							message = vim.trim(output)
+						end
+						if message == "" then
+							message = "Could not load git log for " .. branch
+						end
+						set_preview_lines(bufnr, vim.split(message, "\n", { plain = true }))
+					elseif output == "" then
+						set_preview_lines(bufnr, { "No commits found for " .. branch })
+					else
+						local lines, line_highlights = parse_ansi_output(output)
+						set_preview_lines(bufnr, lines, line_highlights)
+					end
+					mark_preview_loaded(bufnr)
+				end)
+			end,
+		})
+
+		if job_id <= 0 then
+			set_preview_lines(bufnr, { "Could not start git log for " .. branch })
+			mark_preview_loaded(bufnr)
+		end
+	end, 75)
+end
+
 local function wt_executable()
 	local path = vim.fn.exepath("wt")
 	if path ~= "" then
@@ -32,11 +263,50 @@ local function command_output(args)
 	return output, nil
 end
 
-local function display_label(label)
-	if label and label:find("root", 1, true) then
-		return "[root]"
+local function split_path(path)
+	local parts = {}
+	for part in path:gmatch("[^/]+") do
+		table.insert(parts, part)
 	end
-	return ""
+	return parts
+end
+
+local function display_path_for_root(path, root)
+	if path == "" then
+		return ""
+	end
+	if root and root ~= "" then
+		if path == root then
+			return "."
+		end
+		if root == "/" and vim.startswith(path, "/") then
+			return path:sub(2)
+		end
+		if root ~= "/" and vim.startswith(path, root .. "/") then
+			return path:sub(#root + 2)
+		end
+		if path:sub(1, 1) == "/" and root:sub(1, 1) == "/" then
+			local path_parts = split_path(path)
+			local root_parts = split_path(root)
+			local index = 1
+			while index <= #path_parts and index <= #root_parts and path_parts[index] == root_parts[index] do
+				index = index + 1
+			end
+
+			local relative = {}
+			for _ = index, #root_parts do
+				table.insert(relative, "..")
+			end
+			for i = index, #path_parts do
+				table.insert(relative, path_parts[i])
+			end
+			if #relative == 0 then
+				return "."
+			end
+			return table.concat(relative, "/")
+		end
+	end
+	return path
 end
 
 local function parse_rows(output)
@@ -47,7 +317,8 @@ local function parse_rows(output)
 	end
 
 	for line in output:gmatch("[^\n]+") do
-		local branch, path, kind, label, sort = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+		local branch, path, kind, label, sort, sha =
+		    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
 		if branch and branch ~= "" then
 			if label == "-" then
 				label = ""
@@ -60,6 +331,7 @@ local function parse_rows(output)
 				path = path,
 				kind = kind,
 				label = label,
+				sha = sha,
 				sort = tonumber(sort) or 1,
 			})
 		end
@@ -68,15 +340,7 @@ local function parse_rows(output)
 	for _, row in ipairs(rows) do
 		local root = root_path or row.path:match("^(.-)/%.worktrees/") or vim.fn.getcwd()
 		row.root = root
-		if row.path == "" then
-			row.display_path = ""
-		elseif row.path == root then
-			row.display_path = "."
-		elseif vim.startswith(row.path, root .. "/") then
-			row.display_path = row.path:sub(#root + 2)
-		else
-			row.display_path = row.path
-		end
+		row.display_path = display_path_for_root(row.path, root)
 	end
 
 	return rows
@@ -329,7 +593,8 @@ local function prepare_target_buffers(buffers, target_root)
 					table.insert(failures, load_err)
 				end
 				if buffer.listed then
-					local listed, listed_err = pcall(vim.api.nvim_buf_set_option, target_bufnr, "buflisted", true)
+					local listed, listed_err = pcall(vim.api.nvim_buf_set_option, target_bufnr,
+						"buflisted", true)
 					if not listed then
 						table.insert(failures, listed_err)
 					end
@@ -382,7 +647,11 @@ local function delete_old_buffers(buffers)
 	local failures = {}
 
 	for _, buffer in ipairs(buffers) do
-		if buffer.path ~= buffer.target_path and vim.api.nvim_buf_is_valid(buffer.bufnr) and not visible[buffer.bufnr] then
+		if
+		    buffer.path ~= buffer.target_path
+		    and vim.api.nvim_buf_is_valid(buffer.bufnr)
+		    and not visible[buffer.bufnr]
+		then
 			local ok, err = pcall(vim.api.nvim_buf_delete, buffer.bufnr, { force = false })
 			if ok then
 				deleted = deleted + 1
@@ -416,30 +685,40 @@ local function switch_buffers_to_worktree(target_root)
 
 	local modified = modified_buffer_paths(buffers)
 	if #modified > 0 then
-		vim.notify("Unsaved buffers under " .. source_root .. ":\n" .. table.concat(modified, "\n"), vim.log.levels.ERROR)
+		vim.notify(
+			"Unsaved buffers under " .. source_root .. ":\n" .. table.concat(modified, "\n"),
+			vim.log.levels.ERROR
+		)
 		return
 	end
 
 	local buffers_by_bufnr, prepare_failures = prepare_target_buffers(buffers, target_root)
 	if #prepare_failures > 0 then
-		vim.notify("Could not open all target buffers:\n" .. table.concat(prepare_failures, "\n"), vim.log.levels.ERROR)
+		vim.notify("Could not open all target buffers:\n" .. table.concat(prepare_failures, "\n"),
+			vim.log.levels.ERROR)
 		return
 	end
 
 	local switched, switch_failures = switch_windows_to_targets(buffers_by_bufnr, target_root)
 	if #switch_failures > 0 then
-		vim.notify("Could not switch all windows:\n" .. table.concat(switch_failures, "\n"), vim.log.levels.ERROR)
+		vim.notify("Could not switch all windows:\n" .. table.concat(switch_failures, "\n"), vim.log.levels
+		.ERROR)
 		return
 	end
 
 	local deleted, delete_failures = delete_old_buffers(buffers)
 	if #delete_failures > 0 then
-		vim.notify("Switched windows, but could not close some old buffers:\n" .. table.concat(delete_failures, "\n"), vim.log.levels.WARN)
+		vim.notify(
+			"Switched windows, but could not close some old buffers:\n" ..
+			table.concat(delete_failures, "\n"),
+			vim.log.levels.WARN
+		)
 		return
 	end
 
 	vim.notify(
-		"Switched " .. #buffers .. " buffer(s), " .. switched .. " window(s), closed " .. deleted .. " old buffer(s)",
+		"Switched " ..
+		#buffers .. " buffer(s), " .. switched .. " window(s), closed " .. deleted .. " old buffer(s)",
 		vim.log.levels.INFO
 	)
 end
@@ -486,150 +765,139 @@ function M.pick(opts)
 	end
 
 	local max_branch_width = 0
-	local max_path_width = 0
 	for _, candidate in ipairs(candidates) do
-		max_branch_width = math.max(max_branch_width, #candidate.branch)
-		max_path_width = math.max(max_path_width, #candidate.display_path)
+		max_branch_width = math.max(max_branch_width, #(candidate.branch_display or candidate.branch))
 	end
 
 	pickers
-		.new(opts, {
-			prompt_title = "Worktrees",
-			previewer = previewers.new_termopen_previewer({
-				title = "Git Log",
-				get_command = function(entry)
-					if not entry or not entry.value or not entry.value.branch then
-						return nil
-					end
+	    .new(opts, {
+		    prompt_title = "Worktrees",
+		    previewer = previewers.new_buffer_previewer({
+			    title = "Git Log",
+			    get_buffer_by_name = function(_, entry)
+				    if not entry or not entry.value or not entry.value.branch then
+					    return nil
+				    end
+				    return table.concat({ "wt-git-log", entry.value.root, entry.value.branch, entry.value.sha or "" }, ":")
+			    end,
+			    define_preview = function(self, entry)
+				    configure_preview_window(self.state.winid)
+				    if self.state.bufname and vim.b[self.state.bufnr].wt_git_log_loaded then
+					    return
+				    end
+				    if not entry or not entry.value or not entry.value.branch then
+					    return
+				    end
 
-					if vim.fn.executable("less") == 1 then
-						return {
-							"sh",
-							"-c",
-							'git -C "$1" --no-pager log --graph --color=always --decorate "$2" -- | less -R',
-							"sh",
-							entry.value.root,
-							entry.value.branch,
-						}
-					end
+				    preview_git_log(self.state.bufnr, self.state.winid, entry.value.root, entry.value.branch)
+			    end,
+		    }),
+		    finder = finders.new_table({
+			    results = candidates,
+			    entry_maker = function(entry)
+				    local displayer = entry_display.create({
+					    separator = "  ",
+					    items = {
+						    { width = max_branch_width },
+						    { remaining = true },
+					    },
+				    })
 
-					return {
-						"git",
-						"-C",
-						entry.value.root,
-						"--no-pager",
-						"log",
-						"--color=always",
-						"--decorate",
-						entry.value.branch,
-						"--",
-					}
-				end,
-			}),
-			finder = finders.new_table({
-				results = candidates,
-				entry_maker = function(entry)
-					local displayer = entry_display.create({
-						separator = "  ",
-						items = {
-							{ width = max_branch_width },
-							{ width = max_path_width },
-							{ remaining = true },
-						},
-					})
+				    return {
+					    value = entry,
+					    branch = entry.branch,
+					    path = entry.path,
+					    display_path = entry.display_path,
+					    display = function()
+						    local branch_display = entry.branch_display or entry.branch
+						    if entry.display_path == "" then
+							    return branch_display
+						    end
+						    return displayer({
+							    branch_display,
+							    { entry.display_path, "TelescopeResultsComment" },
+						    })
+					    end,
+					    ordinal = entry.branch .. " " .. entry.display_path,
+				    }
+			    end,
+		    }),
+		    sorter = conf.generic_sorter(opts),
+		    attach_mappings = function(prompt_bufnr, map)
+			    actions.select_default:replace(function()
+				    actions.close(prompt_bufnr)
+				    local selection = action_state.get_selected_entry()
+				    if selection then
+					    resolve_and_open(selection.value, "default")
+				    end
+			    end)
+			    actions.select_horizontal:replace(function()
+				    actions.close(prompt_bufnr)
+				    local selection = action_state.get_selected_entry()
+				    if selection then
+					    resolve_and_open(selection.value, "horizontal")
+				    end
+			    end)
+			    actions.select_vertical:replace(function()
+				    actions.close(prompt_bufnr)
+				    local selection = action_state.get_selected_entry()
+				    if selection then
+					    resolve_and_open(selection.value, "vertical")
+				    end
+			    end)
+			    actions.select_tab:replace(function()
+				    actions.close(prompt_bufnr)
+				    local selection = action_state.get_selected_entry()
+				    if selection then
+					    resolve_and_open(selection.value, "tab")
+				    end
+			    end)
+			    map("i", "<tab>", function()
+				    actions.close(prompt_bufnr)
+				    local selection = action_state.get_selected_entry()
+				    if selection then
+					    resolve_and_find_files(selection.value)
+				    end
+			    end)
+			    local switch_selection = function()
+				    actions.close(prompt_bufnr)
+				    local selection = action_state.get_selected_entry()
+				    if selection then
+					    resolve_and_switch_buffers(selection.value)
+				    end
+			    end
+			    map("i", "<C-s>", switch_selection)
+			    map("n", "<C-s>", switch_selection)
+			    local delete_selection = function()
+				    local selection = action_state.get_selected_entry()
+				    if not selection then
+					    return
+				    end
 
-					return {
-						value = entry,
-						branch = entry.branch,
-						path = entry.path,
-						display_path = entry.display_path,
-						display = function()
-							return displayer({
-								entry.branch,
-								{ entry.display_path, "TelescopeResultsComment" },
-								{ display_label(entry.label), "TelescopeResultsComment" },
-							})
-						end,
-						ordinal = entry.branch .. " " .. entry.path .. " " .. display_label(entry.label),
-					}
-				end,
-			}),
-			sorter = conf.generic_sorter(opts),
-			attach_mappings = function(prompt_bufnr, map)
-				actions.select_default:replace(function()
-					actions.close(prompt_bufnr)
-					local selection = action_state.get_selected_entry()
-					if selection then
-						resolve_and_open(selection.value, "default")
-					end
-				end)
-				actions.select_horizontal:replace(function()
-					actions.close(prompt_bufnr)
-					local selection = action_state.get_selected_entry()
-					if selection then
-						resolve_and_open(selection.value, "horizontal")
-					end
-				end)
-				actions.select_vertical:replace(function()
-					actions.close(prompt_bufnr)
-					local selection = action_state.get_selected_entry()
-					if selection then
-						resolve_and_open(selection.value, "vertical")
-					end
-				end)
-				actions.select_tab:replace(function()
-					actions.close(prompt_bufnr)
-					local selection = action_state.get_selected_entry()
-					if selection then
-						resolve_and_open(selection.value, "tab")
-					end
-				end)
-				map("i", "<tab>", function()
-					actions.close(prompt_bufnr)
-					local selection = action_state.get_selected_entry()
-					if selection then
-						resolve_and_find_files(selection.value)
-					end
-				end)
-				local switch_selection = function()
-					actions.close(prompt_bufnr)
-					local selection = action_state.get_selected_entry()
-					if selection then
-						resolve_and_switch_buffers(selection.value)
-					end
-				end
-				map("i", "<C-s>", switch_selection)
-				map("n", "<C-s>", switch_selection)
-				local delete_selection = function()
-					local selection = action_state.get_selected_entry()
-					if not selection then
-						return
-					end
+				    local entry = selection.value
+				    if entry.kind == "worktree" then
+					    local choice = vim.fn.confirm(
+						    "Remove worktree '" .. entry.branch .. "'?\n" .. entry.path,
+						    "&Remove\n&Cancel",
+						    2,
+						    "Warning"
+					    )
+					    if choice ~= 1 then
+						    return
+					    end
+				    end
 
-					local entry = selection.value
-					if entry.kind == "worktree" then
-						local choice = vim.fn.confirm(
-							"Remove worktree '" .. entry.branch .. "'?\n" .. entry.path,
-							"&Remove\n&Cancel",
-							2,
-							"Warning"
-						)
-						if choice ~= 1 then
-							return
-						end
-					end
-
-					if remove_worktree(entry) then
-						actions.close(prompt_bufnr)
-						M.pick(opts)
-					end
-				end
-				map("i", "<C-d>", delete_selection)
-				map("n", "<C-d>", delete_selection)
-				return true
-			end,
-		})
-		:find()
+				    if remove_worktree(entry) then
+					    actions.close(prompt_bufnr)
+					    M.pick(opts)
+				    end
+			    end
+			    map("i", "<C-d>", delete_selection)
+			    map("n", "<C-d>", delete_selection)
+			    return true
+		    end,
+	    })
+	    :find()
 end
 
 function M.setup(opts)

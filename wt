@@ -23,7 +23,7 @@ EOF
 
 find_worktrees_root() {
   local dir="${1:-$PWD}"
-  local git_root
+  local git_root main_worktree
 
   while [ "$dir" != "/" ]; do
     if [ -d "$dir/.worktrees" ]; then
@@ -32,6 +32,12 @@ find_worktrees_root() {
     fi
     dir=$(dirname "$dir")
   done
+
+  main_worktree=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree / { print substr($0, 10); exit }' || true)
+  if [ -n "$main_worktree" ]; then
+    printf '%s\n' "$main_worktree"
+    return 0
+  fi
 
   git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
   if [ -n "$git_root" ]; then
@@ -54,24 +60,37 @@ root_branch() {
   git branch --show-current 2>/dev/null || true
 }
 
-worktree_path_for_branch() {
-  local target="$1"
+is_existing_worktree_path() {
+  local path="$1"
 
+  [ -n "$path" ] || return 1
+  [ -d "$path" ] || return 1
+  git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+worktree_branch_rows() {
   git worktree list --porcelain 2>/dev/null |
-    awk -v target="$target" '
+    awk '
+      function short_sha(value) {
+        return substr(value, 1, 7)
+      }
       function flush() {
-        if (path != "" && branch == target) {
-          print path
-          found = 1
-          exit
+        if (path != "" && branch != "") {
+          print branch "\t" path "\t" short_sha(head)
         }
         path = ""
         branch = ""
+        head = ""
       }
       /^worktree / {
         flush()
         path = substr($0, 10)
         branch = ""
+        head = ""
+        next
+      }
+      /^HEAD / {
+        head = substr($0, 6)
         next
       }
       /^branch refs\/heads\// {
@@ -79,12 +98,25 @@ worktree_path_for_branch() {
         next
       }
       /^$/ { flush() }
-      END { if (!found) flush(); if (found) exit 0 }
+      END { flush() }
     '
 }
 
+worktree_path_for_branch() {
+  local target="$1" branch path sha
+
+  while IFS=$'\t' read -r branch path sha; do
+    [ "$branch" = "$target" ] || continue
+    is_existing_worktree_path "$path" || continue
+    printf '%s\n' "$path"
+    return 0
+  done < <(worktree_branch_rows)
+
+  return 0
+}
+
 list_candidates() {
-  local root root_branch_name branch path row seen_branches
+  local root root_branch_name root_sha branch path row seen_branches sha
   local -a worktree_rows branches
 
   seen_branches=""
@@ -97,63 +129,45 @@ list_candidates() {
 
   cd "$root"
   root_branch_name=$(root_branch)
+  root_sha=$(git rev-parse --short=7 HEAD 2>/dev/null || true)
 
   if [ -n "$root_branch_name" ]; then
-    printf '%s\t%s\t%s\t%s\t%s\n' "$root_branch_name" "$root" root root 0
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$root_branch_name" "$root" root root 0 "$root_sha"
     seen_branches="${seen_branches}${root_branch_name}"$'\n'
   fi
 
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     worktree_rows+=("$row")
-  done < <(
-    git worktree list --porcelain 2>/dev/null |
-      awk '
-        function flush() {
-          if (path != "" && branch != "") {
-            marker = "/.worktrees/"
-            idx = index(path, marker)
-            if (idx > 0) print branch "\t" path
-          }
-          path = ""
-          branch = ""
-        }
-        /^worktree / {
-          flush()
-          path = substr($0, 10)
-          branch = ""
-          next
-        }
-        /^branch refs\/heads\// {
-          branch = substr($0, 19)
-          next
-        }
-        /^$/ { flush() }
-        END { flush() }
-      '
-  )
+  done < <(worktree_branch_rows)
 
-  while IFS= read -r branch; do
-    [ -n "$branch" ] || continue
-    branches+=("$branch")
-  done < <(git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null)
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    branches+=("$row")
+  done < <(git for-each-ref --format='%(refname:short)%09%(objectname:short=7)' refs/heads/ 2>/dev/null)
 
   for row in "${worktree_rows[@]}"; do
     [ -n "$row" ] || continue
     branch=${row%%$'\t'*}
-    path=${row#*$'\t'}
+    row=${row#*$'\t'}
+    path=${row%%$'\t'*}
+    sha=${row#*$'\t'}
     [ -n "$branch" ] || continue
     [ -n "$path" ] || continue
+    is_existing_worktree_path "$path" || continue
     list_contains "$branch" "$seen_branches" && continue
     seen_branches="${seen_branches}${branch}"$'\n'
-    printf '%s\t%s\t%s\t%s\t%s\n' "$branch" "$path" worktree worktree 0
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$branch" "$path" worktree worktree 0 "$sha"
   done
 
-  for branch in "${branches[@]}"; do
+  for row in "${branches[@]}"; do
+    [ -n "$row" ] || continue
+    branch=${row%%$'\t'*}
+    sha=${row#*$'\t'}
     [ -n "$branch" ] || continue
     list_contains "$branch" "$seen_branches" && continue
     seen_branches="${seen_branches}${branch}"$'\n'
-    printf '%s\t\t\t\t%s\n' "$branch" 1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$branch" "" branch branch 1 "$sha"
   done
 
   return 0
@@ -204,38 +218,39 @@ resolve_path() {
 
 format_rows() {
   awk -F '\t' '
-    function display_label(label) {
-      if (label ~ /(^|, )root($|,)/) return "[root]"
-      return ""
-    }
-    function display_path(path) {
+    function display_path(path,    npath, nroot, path_parts, root_parts, common, i, out) {
       if (path == "") return ""
       if (root_path != "" && path == root_path) return "."
-      if (root_path != "" && index(path, root_path "/") == 1) return substr(path, length(root_path) + 2)
+      if (root_path != "" && root_path != "/" && index(path, root_path "/") == 1) return substr(path, length(root_path) + 2)
+      if (root_path == "/" && substr(path, 1, 1) == "/") return substr(path, 2)
+      if (root_path != "" && substr(path, 1, 1) == "/" && substr(root_path, 1, 1) == "/") {
+        npath = split(path, path_parts, "/")
+        nroot = split(root_path, root_parts, "/")
+        common = 1
+        while (common <= npath && common <= nroot && path_parts[common] == root_parts[common]) common++
+        out = ""
+        for (i = common; i <= nroot; i++) if (root_parts[i] != "") out = out (out == "" ? "" : "/") ".."
+        for (i = common; i <= npath; i++) if (path_parts[i] != "") out = out (out == "" ? "" : "/") path_parts[i]
+        return out == "" ? "." : out
+      }
       return path
     }
     {
       rows[NR] = $0
       if ($3 == "root") root_path = $2
-      if (length($1) > w1) w1 = length($1)
     }
     END {
       for (i = 1; i <= NR; i++) {
         split(rows[i], f, "\t")
         shown_path[i] = display_path(f[2])
-        if (length(shown_path[i]) > w2) w2 = length(shown_path[i])
+        branch_label[i] = f[1]
+        if (length(branch_label[i]) > branch_width) branch_width = length(branch_label[i])
       }
       for (i = 1; i <= NR; i++) {
-        split(rows[i], f, "\t")
-        label = display_label(f[4])
-        if (shown_path[i] == "" && label != "") {
-          printf "%-" w1 "s  %-" w2 "s  %s\n", f[1], "", label
-        } else if (shown_path[i] == "") {
-          print f[1]
-        } else if (label != "") {
-          printf "%-" w1 "s  %-" w2 "s  %s\n", f[1], shown_path[i], label
+        if (shown_path[i] == "") {
+          print branch_label[i]
         } else {
-          printf "%-" w1 "s  %s\n", f[1], shown_path[i]
+          printf "%-" branch_width "s  %s\n", branch_label[i], shown_path[i]
         }
       }
     }
@@ -268,9 +283,9 @@ print_zsh_completion() {
 _wt() {
   local -a values labels
   local -a active_values active_labels normal_values normal_labels
-  local line branch worktree_path kind label sort formatted_label display_label display_path root_path cur wt_rows
+  local line branch worktree_path kind label sort sha formatted_label display_path root_path cur wt_rows branch_label
   local -a fields filtered_values filtered_labels
-  local branch_width path_width max_branch_width=0 max_path_width=0 i
+  local branch_width max_branch_width=0 i
 
   _wt_fuzzy_match() {
     local needle="${1:l}" haystack="${2:l}" char
@@ -290,6 +305,47 @@ _wt() {
     return 0
   }
 
+  _wt_display_path() {
+    local path="$1" root="$2" rel=""
+    local -a path_parts root_parts
+    local i j
+
+    if [[ -z "$path" ]]; then
+      print -r -- ""
+      return
+    fi
+    if [[ -n "$root" && "$path" == "$root" ]]; then
+      print -r -- "."
+      return
+    fi
+    if [[ -n "$root" && "$root" != "/" && "$path" == "$root"/* ]]; then
+      print -r -- "${path#$root/}"
+      return
+    fi
+    if [[ "$root" == "/" && "$path" == /* ]]; then
+      print -r -- "${path#/}"
+      return
+    fi
+    if [[ -n "$root" && "$path" == /* && "$root" == /* ]]; then
+      path_parts=("${(@s:/:)path}")
+      root_parts=("${(@s:/:)root}")
+      i=1
+      while (( i <= ${#path_parts} && i <= ${#root_parts} )) && [[ "${path_parts[i]}" == "${root_parts[i]}" ]]; do
+        (( i++ ))
+      done
+      for ((j = i; j <= ${#root_parts}; j++)); do
+        [[ -n "${root_parts[j]}" ]] && rel="${rel:+$rel/}.."
+      done
+      for ((j = i; j <= ${#path_parts}; j++)); do
+        [[ -n "${path_parts[j]}" ]] && rel="${rel:+$rel/}${path_parts[j]}"
+      done
+      print -r -- "${rel:-.}"
+      return
+    fi
+
+    print -r -- "$path"
+  }
+
   cur="${words[CURRENT]}"
   wt_rows=$(command wt __list 2>/dev/null)
 
@@ -307,16 +363,9 @@ _wt() {
     branch="$fields[1]"
     worktree_path="$fields[2]"
     [[ -n "$branch" ]] || continue
-    display_path="$worktree_path"
-    if [[ -n "$root_path" && "$worktree_path" == "$root_path" ]]; then
-      display_path="."
-    elif [[ -n "$root_path" && "$worktree_path" == "$root_path"/* ]]; then
-      display_path="${worktree_path#$root_path/}"
-    fi
-    branch_width=${#branch}
-    path_width=${#display_path}
+    branch_label="$branch"
+    branch_width=${#branch_label}
     (( branch_width > max_branch_width )) && max_branch_width=$branch_width
-    (( path_width > max_path_width )) && max_path_width=$path_width
   done <<< "$wt_rows"
 
   while IFS= read -r line; do
@@ -326,28 +375,16 @@ _wt() {
     kind="$fields[3]"
     label="$fields[4]"
     sort="$fields[5]"
+    sha="$fields[6]"
     [[ -n "$branch" ]] || continue
 
-    display_label=""
-    if [[ "$label" == *root* ]]; then
-      display_label="[root]"
-    fi
+    display_path=$(_wt_display_path "$worktree_path" "$root_path")
+    branch_label="$branch"
 
-    display_path="$worktree_path"
-    if [[ -n "$root_path" && "$worktree_path" == "$root_path" ]]; then
-      display_path="."
-    elif [[ -n "$root_path" && "$worktree_path" == "$root_path"/* ]]; then
-      display_path="${worktree_path#$root_path/}"
-    fi
-
-    if [[ -z "$display_path" && -n "$display_label" ]]; then
-      formatted_label=$(printf "%-${max_branch_width}s  %-${max_path_width}s  %s" "$branch" "" "$display_label")
-    elif [[ -z "$display_path" ]]; then
-      formatted_label="$branch"
-    elif [[ -n "$display_label" ]]; then
-      formatted_label=$(printf "%-${max_branch_width}s  %-${max_path_width}s  %s" "$branch" "$display_path" "$display_label")
+    if [[ -z "$display_path" ]]; then
+      formatted_label="$branch_label"
     else
-      formatted_label=$(printf "%-${max_branch_width}s  %s" "$branch" "$display_path")
+      formatted_label=$(printf "%-${max_branch_width}s  %s" "$branch_label" "$display_path")
     fi
 
     if [[ "$sort" == 0 ]]; then

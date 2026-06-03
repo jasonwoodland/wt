@@ -29,7 +29,7 @@ command wt --help
 
 ## Telescope picker
 
-The worktree picker lists existing worktrees and local branches with the same three-column branch/path/marker format as the shell. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
+The worktree picker lists existing worktrees and local branches as `{branch name}  {relative worktree path}`. The path is shown only for existing worktrees, including worktrees outside `.worktrees`; branch-only rows omit the path. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
 
 ```lua
 require("wt").setup({ key = "<Space>w" })
