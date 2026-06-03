@@ -506,7 +506,7 @@ function M.pick(opts)
 						return {
 							"sh",
 							"-c",
-							'git -C "$1" --no-pager log --color=always --decorate "$2" -- | less -R',
+							'git -C "$1" --no-pager log --graph --color=always --decorate "$2" -- | less -R',
 							"sh",
 							entry.value.root,
 							entry.value.branch,
