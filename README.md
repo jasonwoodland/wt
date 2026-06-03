@@ -8,6 +8,8 @@ Shell utility and [telescope.nvim](https://github.com/nvim-telescope/telescope.n
 wt              # open the interactive picker when fzf is available
 wt -            # cd to the repo root that owns .worktrees
 wt <branch>     # cd to the branch's existing worktree, or create .worktrees/<branch>
+wt --clean      # remove clean non-main worktrees after confirmation
+wt -cf          # remove clean non-main worktrees without confirmation
 ```
 
 ## Installation
@@ -49,4 +51,4 @@ require("wt").setup({ key = "<Space>w" })
 
 `<C-s>` refuses to switch if any matching source-root buffers are unsaved. When it succeeds, it opens corresponding buffers under the selected worktree, preserves window views, and closes the old source-root buffers.
 
-`<C-d>` only removes clean worktrees (no untracked files and no modification in tracked files)
+`<C-d>` and `wt --clean` only remove clean worktrees (no untracked files and no modification in tracked files). `wt -cf` skips confirmation but still does not force dirty worktree removal.

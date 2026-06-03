@@ -6,6 +6,9 @@ usage() {
 Usage: wt
        wt -
        wt <branch>
+       wt --clean [-f]
+       wt -c [-f]
+       wt -cf
        wt --help
        wt --zsh-completion
        wt __list
@@ -14,6 +17,8 @@ Usage: wt
 With no arguments, wt opens an fzf picker when fzf is available.
 Use "wt -" to resolve the repo root that owns .worktrees.
 Use "wt <branch>" to resolve or create that branch's worktree path.
+Use "wt --clean" or "wt -c" to remove clean non-main worktrees after confirmation.
+Use "wt -cf" to skip the confirmation prompt. -f never forces dirty worktree removal.
 
 wt is normally used through its zsh autoload function so it can change the
 current shell directory. The executable prints paths for shell, completion, and
@@ -113,6 +118,189 @@ worktree_path_for_branch() {
   done < <(worktree_branch_rows)
 
   return 0
+}
+
+worktree_rows() {
+  git worktree list --porcelain 2>/dev/null |
+    awk '
+      function short_sha(value) {
+        return substr(value, 1, 7)
+      }
+      function flush() {
+        if (path != "") {
+          print path "\t" branch "\t" short_sha(head)
+        }
+        path = ""
+        branch = ""
+        head = ""
+      }
+      /^worktree / {
+        flush()
+        path = substr($0, 10)
+        branch = ""
+        head = ""
+        next
+      }
+      /^HEAD / {
+        head = substr($0, 6)
+        next
+      }
+      /^branch refs\/heads\// {
+        branch = substr($0, 19)
+        next
+      }
+      /^$/ { flush() }
+      END { flush() }
+    '
+}
+
+relative_path_for_root() {
+  local path="$1" root="$2" rel=""
+  local -a path_parts root_parts
+  local i j
+
+  if [ -z "$path" ]; then
+    printf '\n'
+    return 0
+  fi
+  if [ -n "$root" ] && [ "$path" = "$root" ]; then
+    printf '.\n'
+    return 0
+  fi
+  if [ -n "$root" ] && [ "$root" != "/" ] && [[ "$path" == "$root"/* ]]; then
+    printf '%s\n' "${path#$root/}"
+    return 0
+  fi
+  if [ "$root" = "/" ] && [[ "$path" == /* ]]; then
+    printf '%s\n' "${path#/}"
+    return 0
+  fi
+  if [ -n "$root" ] && [[ "$path" == /* ]] && [[ "$root" == /* ]]; then
+    IFS=/ read -r -a path_parts <<< "$path"
+    IFS=/ read -r -a root_parts <<< "$root"
+    i=0
+    while [ "$i" -lt "${#path_parts[@]}" ] && [ "$i" -lt "${#root_parts[@]}" ] && [ "${path_parts[$i]}" = "${root_parts[$i]}" ]; do
+      i=$((i + 1))
+    done
+    for ((j = i; j < ${#root_parts[@]}; j++)); do
+      [ -n "${root_parts[$j]}" ] && rel="${rel:+$rel/}.."
+    done
+    for ((j = i; j < ${#path_parts[@]}; j++)); do
+      [ -n "${path_parts[$j]}" ] && rel="${rel:+$rel/}${path_parts[$j]}"
+    done
+    printf '%s\n' "${rel:-.}"
+    return 0
+  fi
+
+  printf '%s\n' "$path"
+}
+
+worktree_is_clean() {
+  local path="$1" status
+
+  status=$(git -C "$path" status --porcelain --untracked-files=all 2>/dev/null || true)
+  [ -z "$status" ]
+}
+
+clean_worktrees() {
+  local root no_confirm=0 clean_requested=0 arg reply path branch sha display failed=0 i
+  local -a clean_paths clean_displays dirty_displays failed_displays removed_displays
+
+  for arg in "$@"; do
+    case "$arg" in
+      --clean|-c)
+        clean_requested=1
+        ;;
+      -cf|-fc)
+        clean_requested=1
+        no_confirm=1
+        ;;
+      -f)
+        no_confirm=1
+        ;;
+      *)
+        echo "Usage: wt --clean [-f]" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  if [ "$clean_requested" != 1 ]; then
+    echo "Usage: wt --clean [-f]" >&2
+    return 2
+  fi
+
+  root=$(find_worktrees_root) || {
+    echo "Could not find .worktrees directory or Git repository root." >&2
+    return 1
+  }
+  root=$(cd "$root" && pwd -P)
+  cd "$root"
+
+  while IFS=$'\t' read -r path branch sha; do
+    [ -n "$path" ] || continue
+    [ "$path" != "$root" ] || continue
+    is_existing_worktree_path "$path" || continue
+    display=$(relative_path_for_root "$path" "$root")
+    if worktree_is_clean "$path"; then
+      clean_paths+=("$path")
+      clean_displays+=("$display")
+    else
+      dirty_displays+=("$display")
+    fi
+  done < <(worktree_rows)
+
+  if [ "${#clean_paths[@]}" -eq 0 ]; then
+    echo "No clean non-main worktrees found."
+    if [ "${#dirty_displays[@]}" -gt 0 ]; then
+      echo "Skipped unclean worktrees:"
+      printf '  %s\n' "${dirty_displays[@]}"
+    fi
+    return 0
+  fi
+
+  if [ "$no_confirm" != 1 ]; then
+    echo "Remove ${#clean_paths[@]} clean non-main worktree(s)?"
+    printf '  %s\n' "${clean_displays[@]}"
+    printf '[y/N] '
+    if ! read -r reply; then
+      reply=""
+    fi
+    case "$reply" in
+      y|Y|yes|YES)
+        ;;
+      *)
+        echo "Aborted."
+        return 130
+        ;;
+    esac
+  fi
+
+  for i in "${!clean_paths[@]}"; do
+    path=${clean_paths[$i]}
+    display=${clean_displays[$i]}
+    if git worktree remove "$path" >&2; then
+      removed_displays+=("$display")
+    else
+      failed=1
+      failed_displays+=("$display")
+    fi
+  done
+
+  if [ "${#removed_displays[@]}" -gt 0 ]; then
+    echo "Removed clean worktrees:"
+    printf '  %s\n' "${removed_displays[@]}"
+  fi
+  if [ "${#dirty_displays[@]}" -gt 0 ]; then
+    echo "Skipped unclean worktrees:"
+    printf '  %s\n' "${dirty_displays[@]}"
+  fi
+  if [ "${#failed_displays[@]}" -gt 0 ]; then
+    echo "Failed to remove worktrees:"
+    printf '  %s\n' "${failed_displays[@]}"
+  fi
+
+  return "$failed"
 }
 
 list_candidates() {
@@ -281,7 +469,7 @@ print_zsh_completion() {
 #compdef wt
 
 _wt() {
-  local -a values labels
+  local -a values labels option_values option_labels
   local -a active_values active_labels normal_values normal_labels
   local line branch worktree_path kind label sort sha formatted_label display_path root_path cur wt_rows branch_label
   local -a fields filtered_values filtered_labels
@@ -347,6 +535,19 @@ _wt() {
   }
 
   cur="${words[CURRENT]}"
+
+  if [[ "$cur" == -* ]]; then
+    option_values=(--clean -c -f -cf)
+    option_labels=(
+      "--clean  remove clean non-main worktrees after confirmation"
+      "-c       remove clean non-main worktrees after confirmation"
+      "-f       skip confirmation when used with -c/--clean"
+      "-cf      remove clean non-main worktrees without confirmation"
+    )
+    compadd -Q -V wt-options -d option_labels -l -- "${option_values[@]}"
+    return
+  fi
+
   wt_rows=$(command wt __list 2>/dev/null)
 
   while IFS= read -r line; do
@@ -423,6 +624,9 @@ case "${1:-}" in
     ;;
   --zsh-completion)
     print_zsh_completion
+    ;;
+  --clean|-c|-f|-cf|-fc)
+    clean_worktrees "$@"
     ;;
   __list)
     list_candidates
