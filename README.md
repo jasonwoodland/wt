@@ -68,13 +68,21 @@ require("wt").setup({ key = "<Space>w" })
 
 The picker lists existing worktrees and local branches with the same three-column branch/path/marker format as the shell. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
 
-Actions mirror the dotfiles projects picker:
+Actions:
 
-- `<CR>`: `lcd <path>` and `edit .`
-- horizontal split: `split <path>` and `lcd <path>`
-- vertical split: `vertical split <path>` and `lcd <path>`
-- tab action: `tabnew`, `lcd <path>`, and `edit .`
-- `<Tab>`: drill into `find_files({ cwd = path })`
+| Key | Mode | Action |
+| --- | --- | --- |
+| `<CR>` | insert/normal | Resolve or create the selected worktree, `lcd <path>`, and `edit .` |
+| `<C-x>` | Telescope default | Resolve or create the selected worktree, `split <path>`, and `lcd <path>` |
+| `<C-v>` | Telescope default | Resolve or create the selected worktree, `vsplit <path>`, and `lcd <path>` |
+| `<C-t>` | Telescope default | Resolve or create the selected worktree, open a tab, `lcd <path>`, and `edit .` |
+| `<Tab>` | insert | Drill into `find_files({ cwd = path })` for the selected worktree |
+| `<C-s>` | insert/normal | Switch buffers and windows from the current Git root to the selected worktree |
+| `<C-d>` | insert/normal | Confirm and remove the selected existing worktree |
+
+`<C-s>` refuses to switch if any matching source-root buffers are unsaved. When it succeeds, it opens corresponding buffers under the selected worktree, preserves window views, and closes the old source-root buffers.
+
+`<C-d>` only removes existing worktree rows. Root rows and local branches without a worktree are not removable.
 
 ## Requirements
 
