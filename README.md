@@ -17,19 +17,13 @@ wt -cf          # remove clean non-main worktrees without confirmation
 
 ## Installation
 
-Add to your `zshrc`:
+Add to your `.zshrc`:
 
 ```zsh
 PATH="$HOME/Developer/github.com/jasonwoodland/wt:$PATH"
 fpath+=("$HOME/Developer/github.com/jasonwoodland/wt/zsh/functions")
 fpath+=("$HOME/Developer/github.com/jasonwoodland/wt/zsh/completion")
 autoload -Uz wt
-```
-
-## Command helper
-
-```sh
-command wt --help
 ```
 
 ## Telescope picker
@@ -55,3 +49,21 @@ require("wt").setup({ key = "<Space>w" })
 `<C-s>` refuses to switch if any matching source-root buffers are unsaved. When it succeeds, it opens corresponding buffers under the selected worktree, preserves window views, remaps explicit window-local `:lcd` and tab-local `:tcd` directories to the same relative paths in the selected worktree, and closes the old source-root buffers. Explicit directories outside the source root, including nested `.worktrees`, are preserved; missing mapped directories fall back to the nearest existing ancestor in the target worktree.
 
 `<C-d>` and `wt --clean` only remove clean worktrees (no untracked files and no modification in tracked files). Add `--merged [<rev>]` or `-m` with `wt -c` to remove only clean worktrees whose `HEAD` is merged into `<rev>`; when `<rev>` is omitted, the root worktree `HEAD` is used. `wt -cf` and `wt -cfm` skip confirmation but still do not force dirty worktree removal.
+
+## Appendix
+
+### Branch sorting
+
+`wt` honors Git's `branch.sort` setting when listing worktrees and local branches. To show recently updated branches first:
+
+```sh
+git config set branch.sort -committerdate
+```
+
+Use `git config set --global branch.sort -committerdate` to apply the same sorting to all repositories.
+
+### Command helper
+
+```sh
+command wt --help
+```
