@@ -9,6 +9,9 @@ wt              # open the interactive picker when fzf is available
 wt -            # cd to the repo root that owns .worktrees
 wt <branch>     # cd to the branch's existing worktree, or create .worktrees/<branch>
 wt --clean      # remove clean non-main worktrees after confirmation
+wt -c --merged  # remove clean non-main worktrees merged into the root worktree HEAD
+wt -cm          # shorthand for wt -c --merged
+wt -cfm         # remove clean merged non-main worktrees without confirmation
 wt -cf          # remove clean non-main worktrees without confirmation
 ```
 
@@ -51,4 +54,4 @@ require("wt").setup({ key = "<Space>w" })
 
 `<C-s>` refuses to switch if any matching source-root buffers are unsaved. When it succeeds, it opens corresponding buffers under the selected worktree, preserves window views, remaps explicit window-local `:lcd` and tab-local `:tcd` directories to the same relative paths in the selected worktree, and closes the old source-root buffers. Explicit directories outside the source root, including nested `.worktrees`, are preserved; missing mapped directories fall back to the nearest existing ancestor in the target worktree.
 
-`<C-d>` and `wt --clean` only remove clean worktrees (no untracked files and no modification in tracked files). `wt -cf` skips confirmation but still does not force dirty worktree removal.
+`<C-d>` and `wt --clean` only remove clean worktrees (no untracked files and no modification in tracked files). Add `--merged [<rev>]` or `-m` with `wt -c` to remove only clean worktrees whose `HEAD` is merged into `<rev>`; when `<rev>` is omitted, the root worktree `HEAD` is used. `wt -cf` and `wt -cfm` skip confirmation but still do not force dirty worktree removal.

@@ -6,9 +6,10 @@ usage() {
 Usage: wt
        wt -
        wt <branch>
-       wt --clean [-f]
-       wt -c [-f]
-       wt -cf
+       wt --clean [-f] [--merged [<rev>]]
+       wt -c [-f] [--merged [<rev>]]
+       wt -cm
+       wt -cfm
        wt --help
        wt --zsh-completion
        wt __list
@@ -18,7 +19,9 @@ With no arguments, wt opens an fzf picker when fzf is available.
 Use "wt -" to resolve the repo root that owns .worktrees.
 Use "wt <branch>" to resolve or create that branch's worktree path.
 Use "wt --clean" or "wt -c" to remove clean non-main worktrees after confirmation.
-Use "wt -cf" to skip the confirmation prompt. -f never forces dirty worktree removal.
+Use "wt -c --merged [<rev>]" or "wt -cm" to remove only clean worktrees merged into <rev>.
+When <rev> is omitted, --merged uses the root worktree HEAD.
+Use "wt -cf" or "wt -cfm" to skip the confirmation prompt. -f never forces dirty worktree removal.
 
 wt is normally used through its zsh autoload function so it can change the
 current shell directory. The executable prints paths for shell, completion, and
@@ -202,31 +205,136 @@ worktree_is_clean() {
   [ -z "$status" ]
 }
 
-clean_worktrees() {
-  local root no_confirm=0 clean_requested=0 arg reply path branch sha display failed=0 i
-  local -a clean_paths clean_displays dirty_displays failed_displays removed_displays
+clean_usage() {
+  cat >&2 <<'EOF'
+Usage: wt --clean [-f] [--merged [<rev>]]
+       wt -c [-f] [--merged [<rev>]]
+       wt -cm
+       wt -cfm
+EOF
+}
 
-  for arg in "$@"; do
+is_clean_option_token() {
+  local arg="${1:-}" flags
+
+  case "$arg" in
+    --clean|--merged|--merged=*)
+      return 0
+      ;;
+    -)
+      return 1
+      ;;
+    -*)
+      flags=${arg#-}
+      [ -n "$flags" ] || return 1
+      case "$flags" in
+        *[!cfm]*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+  esac
+
+  return 1
+}
+
+is_merged_rev_token() {
+  local arg="${1:-}"
+
+  [ -n "$arg" ] && [[ "$arg" != -* ]]
+}
+
+worktree_is_merged_to() {
+  local path="$1" target_commit="$2" candidate_head
+
+  candidate_head=$(git -C "$path" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null || true)
+  [ -n "$candidate_head" ] || return 1
+  git merge-base --is-ancestor "$candidate_head" "$target_commit" 2>/dev/null
+}
+
+print_clean_skips() {
+  if [ "${#dirty_displays[@]}" -gt 0 ]; then
+    echo "Skipped unclean worktrees:"
+    printf '  %s\n' "${dirty_displays[@]}"
+  fi
+  if [ "${#unmerged_displays[@]}" -gt 0 ]; then
+    echo "Skipped clean unmerged worktrees:"
+    printf '  %s\n' "${unmerged_displays[@]}"
+  fi
+}
+
+clean_worktrees() {
+  local root no_confirm=0 clean_requested=0 merged_only=0 merged_rev="" merged_target merged_target_commit
+  local arg flags ch reply path branch sha display failed=0 i
+  local -a clean_paths clean_displays dirty_displays unmerged_displays failed_displays removed_displays
+
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    shift
     case "$arg" in
-      --clean|-c)
+      --clean)
         clean_requested=1
         ;;
-      -cf|-fc)
-        clean_requested=1
-        no_confirm=1
+      --merged=*)
+        merged_only=1
+        if [ -n "$merged_rev" ]; then
+          clean_usage
+          return 2
+        fi
+        merged_rev=${arg#--merged=}
+        if [ -z "$merged_rev" ]; then
+          echo "Invalid --merged target: " >&2
+          return 2
+        fi
         ;;
-      -f)
-        no_confirm=1
+      --merged)
+        merged_only=1
+        if [ "$#" -gt 0 ] && is_merged_rev_token "${1:-}"; then
+          if [ -n "$merged_rev" ]; then
+            clean_usage
+            return 2
+          fi
+          merged_rev="$1"
+          shift
+        fi
+        ;;
+      -*)
+        flags=${arg#-}
+        [ -n "$flags" ] || {
+          clean_usage
+          return 2
+        }
+        case "$flags" in
+          *[!cfm]*)
+            clean_usage
+            return 2
+            ;;
+        esac
+        for ((i = 0; i < ${#flags}; i++)); do
+          ch=${flags:i:1}
+          case "$ch" in
+            c) clean_requested=1 ;;
+            f) no_confirm=1 ;;
+            m) merged_only=1 ;;
+          esac
+        done
+        if [ "$arg" = "-m" ] && [ "$#" -gt 0 ] && is_merged_rev_token "${1:-}"; then
+          if [ -n "$merged_rev" ]; then
+            clean_usage
+            return 2
+          fi
+          merged_rev="$1"
+          shift
+        fi
         ;;
       *)
-        echo "Usage: wt --clean [-f]" >&2
+        clean_usage
         return 2
         ;;
     esac
   done
 
   if [ "$clean_requested" != 1 ]; then
-    echo "Usage: wt --clean [-f]" >&2
+    clean_usage
     return 2
   fi
 
@@ -237,30 +345,48 @@ clean_worktrees() {
   root=$(cd "$root" && pwd -P)
   cd "$root"
 
+  if [ "$merged_only" = 1 ]; then
+    merged_target=${merged_rev:-HEAD}
+    merged_target_commit=$(git rev-parse --verify -q "${merged_target}^{commit}" 2>/dev/null || true)
+    if [ -z "$merged_target_commit" ]; then
+      echo "Invalid --merged target: $merged_target" >&2
+      return 2
+    fi
+  fi
+
   while IFS=$'\t' read -r path branch sha; do
     [ -n "$path" ] || continue
     [ "$path" != "$root" ] || continue
     is_existing_worktree_path "$path" || continue
     display=$(relative_path_for_root "$path" "$root")
-    if worktree_is_clean "$path"; then
-      clean_paths+=("$path")
-      clean_displays+=("$display")
-    else
+    if ! worktree_is_clean "$path"; then
       dirty_displays+=("$display")
+      continue
     fi
+    if [ "$merged_only" = 1 ] && ! worktree_is_merged_to "$path" "$merged_target_commit"; then
+      unmerged_displays+=("$display")
+      continue
+    fi
+    clean_paths+=("$path")
+    clean_displays+=("$display")
   done < <(worktree_rows)
 
   if [ "${#clean_paths[@]}" -eq 0 ]; then
-    echo "No clean non-main worktrees found."
-    if [ "${#dirty_displays[@]}" -gt 0 ]; then
-      echo "Skipped unclean worktrees:"
-      printf '  %s\n' "${dirty_displays[@]}"
+    if [ "$merged_only" = 1 ]; then
+      echo "No clean merged non-main worktrees found."
+    else
+      echo "No clean non-main worktrees found."
     fi
+    print_clean_skips
     return 0
   fi
 
   if [ "$no_confirm" != 1 ]; then
-    echo "Remove ${#clean_paths[@]} clean non-main worktree(s)?"
+    if [ "$merged_only" = 1 ]; then
+      echo "Remove ${#clean_paths[@]} clean merged non-main worktree(s)?"
+    else
+      echo "Remove ${#clean_paths[@]} clean non-main worktree(s)?"
+    fi
     printf '  %s\n' "${clean_displays[@]}"
     printf '[y/N] '
     if ! read -r reply; then
@@ -291,10 +417,7 @@ clean_worktrees() {
     echo "Removed clean worktrees:"
     printf '  %s\n' "${removed_displays[@]}"
   fi
-  if [ "${#dirty_displays[@]}" -gt 0 ]; then
-    echo "Skipped unclean worktrees:"
-    printf '  %s\n' "${dirty_displays[@]}"
-  fi
+  print_clean_skips
   if [ "${#failed_displays[@]}" -gt 0 ]; then
     echo "Failed to remove worktrees:"
     printf '  %s\n' "${failed_displays[@]}"
@@ -539,12 +662,18 @@ _wt() {
   cur="${words[CURRENT]}"
 
   if [[ "$cur" == -* ]]; then
-    option_values=(--clean -c -f -cf)
+    option_values=(--clean --merged -c -f -m -cf -fc -cm -mc -cfm)
     option_labels=(
-      "--clean  remove clean non-main worktrees after confirmation"
-      "-c       remove clean non-main worktrees after confirmation"
-      "-f       skip confirmation when used with -c/--clean"
-      "-cf      remove clean non-main worktrees without confirmation"
+      "--clean   remove clean non-main worktrees after confirmation"
+      "--merged  with -c/--clean, remove only worktrees merged into an optional rev"
+      "-c        remove clean non-main worktrees after confirmation"
+      "-f        skip confirmation when used with -c/--clean"
+      "-m        with -c/--clean, shorthand for --merged"
+      "-cf       remove clean non-main worktrees without confirmation"
+      "-fc       remove clean non-main worktrees without confirmation"
+      "-cm       remove clean merged non-main worktrees after confirmation"
+      "-mc       remove clean merged non-main worktrees after confirmation"
+      "-cfm      remove clean merged non-main worktrees without confirmation"
     )
     compadd -Q -V wt-options -d option_labels -l -- "${option_values[@]}"
     return
@@ -630,9 +759,6 @@ case "${1:-}" in
   --zsh-completion)
     print_zsh_completion
     ;;
-  --clean|-c|-f|-cf|-fc)
-    clean_worktrees "$@"
-    ;;
   __list)
     list_candidates
     ;;
@@ -644,6 +770,10 @@ case "${1:-}" in
     pick_candidate
     ;;
   *)
-    resolve_path "$1"
+    if is_clean_option_token "${1:-}"; then
+      clean_worktrees "$@"
+    else
+      resolve_path "$1"
+    fi
     ;;
 esac

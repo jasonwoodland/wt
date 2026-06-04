@@ -3,7 +3,7 @@ emulate -L zsh
 local target="${1:-}"
 local target_path
 
-if [[ "$target" == --* || "$target" == -h || "$target" == -c || "$target" == -f || "$target" == -cf || "$target" == -fc ]]; then
+if [[ "$target" == --* || "$target" == -h || "$target" =~ '^-[cfm]+$' ]]; then
   command wt "$@"
   return $?
 fi
