@@ -110,6 +110,18 @@ worktree_branch_rows() {
     '
 }
 
+branch_ref_rows() {
+  local sort_value
+  local -a sort_args
+
+  for sort_value in "$@"; do
+    [ -n "$sort_value" ] || continue
+    sort_args+=(--sort="$sort_value")
+  done
+
+  git for-each-ref "${sort_args[@]}" --format='%(refname:short)%09%(objectname:short=7)' refs/heads/ 2>/dev/null
+}
+
 worktree_path_for_branch() {
   local target="$1" branch path sha
 
@@ -428,9 +440,11 @@ clean_worktrees() {
 
 list_candidates() {
   local root root_branch_name root_sha branch path row seen_branches sha
-  local -a worktree_rows branches
+  local branch_row sorted_branch sort_value branch_sort_configured
+  local -a worktree_rows branches branch_sort_values
 
   seen_branches=""
+  branch_sort_configured=0
 
   root=$(find_worktrees_root) || {
     echo "Could not find .worktrees directory or Git repository root." >&2
@@ -452,24 +466,57 @@ list_candidates() {
     worktree_rows+=("$row")
   done < <(worktree_branch_rows)
 
+  while IFS= read -r sort_value; do
+    [ -n "$sort_value" ] || continue
+    branch_sort_values+=("$sort_value")
+  done < <(git config --get-all branch.sort 2>/dev/null || true)
+
+  if [ "${#branch_sort_values[@]}" -gt 0 ]; then
+    branch_sort_configured=1
+  fi
+
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     branches+=("$row")
-  done < <(git for-each-ref --format='%(refname:short)%09%(objectname:short=7)' refs/heads/ 2>/dev/null)
+  done < <(branch_ref_rows "${branch_sort_values[@]}")
 
-  for row in "${worktree_rows[@]}"; do
-    [ -n "$row" ] || continue
-    branch=${row%%$'\t'*}
-    row=${row#*$'\t'}
-    path=${row%%$'\t'*}
-    sha=${row#*$'\t'}
-    [ -n "$branch" ] || continue
-    [ -n "$path" ] || continue
-    is_existing_worktree_path "$path" || continue
-    list_contains "$branch" "$seen_branches" && continue
-    seen_branches="${seen_branches}${branch}"$'\n'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$branch" "$path" worktree worktree 0 "$sha"
-  done
+  if [ "$branch_sort_configured" = 1 ]; then
+    for branch_row in "${branches[@]}"; do
+      [ -n "$branch_row" ] || continue
+      sorted_branch=${branch_row%%$'\t'*}
+      [ -n "$sorted_branch" ] || continue
+
+      for row in "${worktree_rows[@]}"; do
+        [ -n "$row" ] || continue
+        branch=${row%%$'\t'*}
+        row=${row#*$'\t'}
+        path=${row%%$'\t'*}
+        sha=${row#*$'\t'}
+        [ "$branch" = "$sorted_branch" ] || continue
+        [ -n "$path" ] || break
+        is_existing_worktree_path "$path" || break
+        if ! list_contains "$branch" "$seen_branches"; then
+          seen_branches="${seen_branches}${branch}"$'\n'
+          printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$branch" "$path" worktree worktree 0 "$sha"
+        fi
+        break
+      done
+    done
+  else
+    for row in "${worktree_rows[@]}"; do
+      [ -n "$row" ] || continue
+      branch=${row%%$'\t'*}
+      row=${row#*$'\t'}
+      path=${row%%$'\t'*}
+      sha=${row#*$'\t'}
+      [ -n "$branch" ] || continue
+      [ -n "$path" ] || continue
+      is_existing_worktree_path "$path" || continue
+      list_contains "$branch" "$seen_branches" && continue
+      seen_branches="${seen_branches}${branch}"$'\n'
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$branch" "$path" worktree worktree 0 "$sha"
+    done
+  fi
 
   for row in "${branches[@]}"; do
     [ -n "$row" ] || continue
