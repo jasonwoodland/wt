@@ -6,7 +6,8 @@ Shell utility and [telescope.nvim](https://github.com/nvim-telescope/telescope.n
 
 ```sh
 wt              # open the interactive picker when fzf is available
-wt -            # cd to the repo root that owns .worktrees
+wt .            # cd to the repo root that owns .worktrees
+wt -            # legacy alias for wt .
 wt <branch>     # cd to the branch's existing worktree, or create .worktrees/<branch>
 wt --clean      # remove clean non-main worktrees after confirmation
 wt -c --merged  # remove clean non-main worktrees merged into the root worktree HEAD

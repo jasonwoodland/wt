@@ -4,6 +4,7 @@ set -eo pipefail
 usage() {
   cat <<'EOF'
 Usage: wt
+       wt .
        wt -
        wt <branch>
        wt --clean [-f] [--merged [<rev>]]
@@ -13,10 +14,11 @@ Usage: wt
        wt --help
        wt --zsh-completion
        wt __list
-       wt __path <branch>
+       wt __path <target>
 
 With no arguments, wt opens an fzf picker when fzf is available.
-Use "wt -" to resolve the repo root that owns .worktrees.
+Use "wt ." to resolve the repo root that owns .worktrees.
+Use "wt -" as a legacy alias for "wt .".
 Use "wt <branch>" to resolve or create that branch's worktree path.
 Use "wt --clean" or "wt -c" to remove clean non-main worktrees after confirmation.
 Use "wt -c --merged [<rev>]" or "wt -cm" to remove only clean worktrees merged into <rev>.
@@ -536,7 +538,7 @@ resolve_path() {
   local root worktree_dir worktree_parent path
 
   if [ -z "$target" ]; then
-    echo "Usage: wt __path <branch>" >&2
+    echo "Usage: wt __path <target>" >&2
     return 1
   fi
 
@@ -548,7 +550,7 @@ resolve_path() {
 
   cd "$root"
 
-  if [ "$target" = "-" ]; then
+  if [ "$target" = "." ] || [ "$target" = "-" ]; then
     printf '%s\n' "$root"
     return 0
   fi
