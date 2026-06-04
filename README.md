@@ -49,6 +49,6 @@ require("wt").setup({ key = "<Space>w" })
 | `<C-s>` | insert/normal     | Switch buffers and windows from the current Git root/worktree to the selected worktree |
 | `<C-d>` | insert/normal     | Confirm and remove the selected existing worktree                                      |
 
-`<C-s>` refuses to switch if any matching source-root buffers are unsaved. When it succeeds, it opens corresponding buffers under the selected worktree, preserves window views, and closes the old source-root buffers.
+`<C-s>` refuses to switch if any matching source-root buffers are unsaved. When it succeeds, it opens corresponding buffers under the selected worktree, preserves window views, remaps explicit window-local `:lcd` and tab-local `:tcd` directories to the same relative paths in the selected worktree, and closes the old source-root buffers. Explicit directories outside the source root, including nested `.worktrees`, are preserved; missing mapped directories fall back to the nearest existing ancestor in the target worktree.
 
 `<C-d>` and `wt --clean` only remove clean worktrees (no untracked files and no modification in tracked files). `wt -cf` skips confirmation but still does not force dirty worktree removal.

@@ -511,6 +511,40 @@ local function relative_to_root(path, root)
 	return path:sub(#root + 2)
 end
 
+local function nearest_existing_dir(path, root)
+	local current = normalize_path(path)
+	local boundary = normalize_path(root)
+	if not current or not boundary then
+		return boundary
+	end
+
+	while path_in_root(current, boundary) do
+		if vim.fn.isdirectory(current) == 1 then
+			return current
+		end
+		if current == boundary then
+			break
+		end
+
+		local parent = normalize_path(vim.fn.fnamemodify(current, ":h"))
+		if not parent or parent == current then
+			break
+		end
+		current = parent
+	end
+
+	return boundary
+end
+
+local function map_cwd_to_target(path, source_root, target_root)
+	path = normalize_path(path)
+	if not path or not buffer_belongs_to_root(path, source_root) then
+		return nil
+	end
+
+	return nearest_existing_dir(path_join(target_root, relative_to_root(path, source_root)), target_root)
+end
+
 local function current_git_root()
 	local output, err = command_output({ "git", "-C", vim.fn.getcwd(), "rev-parse", "--show-toplevel" })
 	if not output then
@@ -615,22 +649,152 @@ local function visible_buffers()
 	return visible
 end
 
-local function switch_windows_to_targets(buffers_by_bufnr, target_root)
+local function safe_haslocaldir(winnr, tabnr)
+	local ok, value = pcall(vim.fn.haslocaldir, winnr, tabnr)
+	return ok and value == 1
+end
+
+local function safe_getcwd(winnr, tabnr)
+	local ok, value = pcall(vim.fn.getcwd, winnr, tabnr)
+	if ok and value and value ~= "" then
+		return normalize_path(value)
+	end
+	return nil
+end
+
+local function snapshot_cwd_scopes(source_root, target_root)
+	local state = {
+		tabs = {},
+		tab_order = {},
+		windows = {},
+	}
+
+	for _, tab in ipairs(vim.api.nvim_list_tabpages()) do
+		local tabnr = vim.api.nvim_tabpage_get_number(tab)
+		local windows = vim.api.nvim_tabpage_list_wins(tab)
+		local tab_scope = {
+			tab = tab,
+			tabnr = tabnr,
+			windows = windows,
+			has_local = false,
+		}
+
+		if safe_haslocaldir(-1, tabnr) then
+			local cwd = safe_getcwd(-1, tabnr)
+			if cwd then
+				tab_scope.has_local = true
+				tab_scope.cwd = cwd
+				tab_scope.mapped = map_cwd_to_target(cwd, source_root, target_root)
+			end
+		end
+
+		state.tabs[tab] = tab_scope
+		table.insert(state.tab_order, tab_scope)
+
+		for _, win in ipairs(windows) do
+			local win_scope = {
+				win = win,
+				tab = tab,
+				tabnr = tabnr,
+				has_local = false,
+			}
+
+			if safe_haslocaldir(win, tabnr) then
+				local cwd = safe_getcwd(win, tabnr)
+				if cwd then
+					win_scope.has_local = true
+					win_scope.cwd = cwd
+					win_scope.mapped = map_cwd_to_target(cwd, source_root, target_root)
+				end
+			end
+
+			state.windows[win] = win_scope
+		end
+	end
+
+	return state
+end
+
+local function restore_current_tab_window(tab, win)
+	if tab and vim.api.nvim_tabpage_is_valid(tab) then
+		pcall(vim.api.nvim_set_current_tabpage, tab)
+	end
+	if win and vim.api.nvim_win_is_valid(win) then
+		pcall(vim.api.nvim_set_current_win, win)
+	end
+end
+
+local function first_valid_window(windows)
+	for _, win in ipairs(windows or {}) do
+		if vim.api.nvim_win_is_valid(win) then
+			return win
+		end
+	end
+	return nil
+end
+
+local function apply_tab_cwds(cwd_state)
+	local failures = {}
+	local current_tab = vim.api.nvim_get_current_tabpage()
+	local current_win = vim.api.nvim_get_current_win()
+
+	for _, tab_scope in ipairs(cwd_state.tab_order) do
+		if tab_scope.has_local and tab_scope.mapped then
+			local win = first_valid_window(tab_scope.windows)
+			if win then
+				local ok, err = pcall(vim.api.nvim_win_call, win, function()
+					vim.cmd.tcd(vim.fn.fnameescape(tab_scope.mapped))
+				end)
+				if not ok then
+					table.insert(failures, err)
+				end
+			end
+		end
+	end
+
+	restore_current_tab_window(current_tab, current_win)
+	return failures
+end
+
+local function desired_window_lcd(win_scope, tab_scope, should_switch, target_root)
+	if win_scope and win_scope.has_local then
+		return win_scope.mapped or win_scope.cwd
+	end
+	if should_switch and not (tab_scope and tab_scope.has_local) then
+		return target_root
+	end
+	return nil
+end
+
+local function switch_windows_to_targets(buffers_by_bufnr, target_root, cwd_state)
 	local switched = 0
 	local failures = {}
+	local current_tab = vim.api.nvim_get_current_tabpage()
+	local current_win = vim.api.nvim_get_current_win()
 
 	for _, win in ipairs(vim.api.nvim_list_wins()) do
 		if vim.api.nvim_win_is_valid(win) then
 			local buffer = buffers_by_bufnr[vim.api.nvim_win_get_buf(win)]
-			if buffer and buffer.path ~= buffer.target_path then
+			local should_switch = buffer and buffer.path ~= buffer.target_path
+			local win_scope = cwd_state.windows[win]
+			local tab_scope = win_scope and cwd_state.tabs[win_scope.tab]
+			local lcd = desired_window_lcd(win_scope, tab_scope, should_switch, target_root)
+
+			if should_switch or lcd then
 				local ok, err = pcall(vim.api.nvim_win_call, win, function()
-					local view = vim.fn.winsaveview()
-					vim.cmd.lcd(vim.fn.fnameescape(target_root))
-					vim.cmd.edit(vim.fn.fnameescape(buffer.target_path))
-					pcall(vim.fn.winrestview, view)
+					local view = should_switch and vim.fn.winsaveview() or nil
+					if lcd then
+						vim.cmd.lcd(vim.fn.fnameescape(lcd))
+					end
+					if should_switch then
+						vim.cmd.edit(vim.fn.fnameescape(buffer.target_path))
+						pcall(vim.fn.winrestview, view)
+					end
 				end)
 				if ok then
-					switched = switched + 1
+					if should_switch then
+						switched = switched + 1
+					end
 				else
 					table.insert(failures, err)
 				end
@@ -638,6 +802,7 @@ local function switch_windows_to_targets(buffers_by_bufnr, target_root)
 		end
 	end
 
+	restore_current_tab_window(current_tab, current_win)
 	return switched, failures
 end
 
@@ -699,7 +864,14 @@ local function switch_buffers_to_worktree(target_root)
 		return
 	end
 
-	local switched, switch_failures = switch_windows_to_targets(buffers_by_bufnr, target_root)
+	local cwd_state = snapshot_cwd_scopes(source_root, target_root)
+	local tab_cwd_failures = apply_tab_cwds(cwd_state)
+	if #tab_cwd_failures > 0 then
+		vim.notify("Could not update all tab directories:\n" .. table.concat(tab_cwd_failures, "\n"), vim.log.levels.ERROR)
+		return
+	end
+
+	local switched, switch_failures = switch_windows_to_targets(buffers_by_bufnr, target_root, cwd_state)
 	if #switch_failures > 0 then
 		vim.notify("Could not switch all windows:\n" .. table.concat(switch_failures, "\n"), vim.log.levels
 		.ERROR)
