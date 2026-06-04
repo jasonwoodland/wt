@@ -151,7 +151,7 @@ end
 
 local function preview_is_current(bufnr, winid)
 	return vim.api.nvim_buf_is_valid(bufnr)
-		and (not winid or not vim.api.nvim_win_is_valid(winid) or vim.api.nvim_win_get_buf(winid) == bufnr)
+	    and (not winid or not vim.api.nvim_win_is_valid(winid) or vim.api.nvim_win_get_buf(winid) == bufnr)
 end
 
 local function lines_to_output(lines)
@@ -764,8 +764,10 @@ function M.pick(opts)
 		return
 	end
 
+	local max_sha_width = 0
 	local max_branch_width = 0
 	for _, candidate in ipairs(candidates) do
+		max_sha_width = math.max(max_sha_width, #candidate.sha)
 		max_branch_width = math.max(max_branch_width, #(candidate.branch_display or candidate.branch))
 	end
 
@@ -778,7 +780,10 @@ function M.pick(opts)
 				    if not entry or not entry.value or not entry.value.branch then
 					    return nil
 				    end
-				    return table.concat({ "wt-git-log", entry.value.root, entry.value.branch, entry.value.sha or "" }, ":")
+				    return table.concat(
+					    { "wt-git-log", entry.value.root, entry.value.branch, entry.value.sha or "" },
+					    ":"
+				    )
 			    end,
 			    define_preview = function(self, entry)
 				    configure_preview_window(self.state.winid)
@@ -789,15 +794,17 @@ function M.pick(opts)
 					    return
 				    end
 
-				    preview_git_log(self.state.bufnr, self.state.winid, entry.value.root, entry.value.branch)
+				    preview_git_log(self.state.bufnr, self.state.winid, entry.value.root,
+					    entry.value.branch)
 			    end,
 		    }),
 		    finder = finders.new_table({
 			    results = candidates,
 			    entry_maker = function(entry)
 				    local displayer = entry_display.create({
-					    separator = "  ",
+					    separator = " ",
 					    items = {
+						    { width = max_sha_width },
 						    { width = max_branch_width },
 						    { remaining = true },
 					    },
@@ -810,15 +817,13 @@ function M.pick(opts)
 					    display_path = entry.display_path,
 					    display = function()
 						    local branch_display = entry.branch_display or entry.branch
-						    if entry.display_path == "" then
-							    return branch_display
-						    end
 						    return displayer({
+							    { entry.sha,          "TelescopeResultsComment" },
 							    branch_display,
 							    { entry.display_path, "TelescopeResultsComment" },
 						    })
 					    end,
-					    ordinal = entry.branch .. " " .. entry.display_path,
+					    ordinal = entry.sha .. " " .. entry.branch .. " " .. entry.display_path,
 				    }
 			    end,
 		    }),

@@ -431,14 +431,16 @@ format_rows() {
       for (i = 1; i <= NR; i++) {
         split(rows[i], f, "\t")
         shown_path[i] = display_path(f[2])
+        sha_label[i] = f[6]
         branch_label[i] = f[1]
+        if (length(sha_label[i]) > sha_width) sha_width = length(sha_label[i])
         if (length(branch_label[i]) > branch_width) branch_width = length(branch_label[i])
       }
       for (i = 1; i <= NR; i++) {
         if (shown_path[i] == "") {
-          print branch_label[i]
+          printf "%-" sha_width "s %s\n", sha_label[i], branch_label[i]
         } else {
-          printf "%-" branch_width "s  %s\n", branch_label[i], shown_path[i]
+          printf "%-" sha_width "s %-" branch_width "s %s\n", sha_label[i], branch_label[i], shown_path[i]
         }
       }
     }
@@ -456,7 +458,7 @@ pick_candidate() {
 
   if command -v fzf >/dev/null 2>&1; then
     selection=$(printf '%s\n' "$rows" | format_rows | fzf --height=~50%) || return 130
-    branch=$(printf '%s\n' "$selection" | awk '{ print $1 }')
+    branch=$(printf '%s\n' "$selection" | awk '{ print $2 }')
     [ -n "$branch" ] || return 1
     resolve_path "$branch"
   else
@@ -473,7 +475,7 @@ _wt() {
   local -a active_values active_labels normal_values normal_labels
   local line branch worktree_path kind label sort sha formatted_label display_path root_path cur wt_rows branch_label
   local -a fields filtered_values filtered_labels
-  local branch_width max_branch_width=0 i
+  local branch_width sha_width max_branch_width=0 max_sha_width=0 i
 
   _wt_fuzzy_match() {
     local needle="${1:l}" haystack="${2:l}" char
@@ -564,8 +566,11 @@ _wt() {
     branch="$fields[1]"
     worktree_path="$fields[2]"
     [[ -n "$branch" ]] || continue
+    sha="$fields[6]"
     branch_label="$branch"
+    sha_width=${#sha}
     branch_width=${#branch_label}
+    (( sha_width > max_sha_width )) && max_sha_width=$sha_width
     (( branch_width > max_branch_width )) && max_branch_width=$branch_width
   done <<< "$wt_rows"
 
@@ -583,9 +588,9 @@ _wt() {
     branch_label="$branch"
 
     if [[ -z "$display_path" ]]; then
-      formatted_label="$branch_label"
+      formatted_label=$(printf "%-${max_sha_width}s %s" "$sha" "$branch_label")
     else
-      formatted_label=$(printf "%-${max_branch_width}s  %s" "$branch_label" "$display_path")
+      formatted_label=$(printf "%-${max_sha_width}s %-${max_branch_width}s %s" "$sha" "$branch_label" "$display_path")
     fi
 
     if [[ "$sort" == 0 ]]; then
