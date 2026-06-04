@@ -990,9 +990,9 @@ function M.pick(opts)
 					    display = function()
 						    local branch_display = entry.branch_display or entry.branch
 						    return displayer({
-							    { entry.sha,          "TelescopeResultsComment" },
+							    { entry.sha,          "Identifier" },
 							    branch_display,
-							    { entry.display_path, "TelescopeResultsComment" },
+							    { entry.display_path, "diffFile" },
 						    })
 					    end,
 					    ordinal = entry.sha .. " " .. entry.branch .. " " .. entry.display_path,
