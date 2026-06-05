@@ -101,9 +101,42 @@ test_dot_root_shorthand_resolves_root_from_linked_worktree() {
   assert_command_resolves_root "$repo" "$linked_path" 'wt . from linked worktree' .
 }
 
+test_zsh_wrapper_dot_from_deleted_worktree_resolves_root_without_getcwd_noise() {
+  local repo linked_path expected output status bin_dir
+
+  if ! command -v zsh >/dev/null 2>&1; then
+    printf 'skip: zsh unavailable\n'
+    return 0
+  fi
+
+  repo=$(make_repo)
+  linked_path=$(create_branch_worktree "$repo" topic)
+  expected=$(canonical_path "$repo")
+  bin_dir=$(mktemp -d "$SUITE_TMP/bin.XXXXXX")
+  ln -s "$WT" "$bin_dir/wt"
+
+  set +e
+  output=$(
+    PATH="$bin_dir:$PATH" WT_FUNCTIONS_DIR="$ROOT_DIR/zsh/functions" WT_DELETED_CWD="$linked_path" \
+      zsh -fc '
+        fpath=("$WT_FUNCTIONS_DIR" $fpath)
+        autoload -Uz wt
+        cd "$WT_DELETED_CWD" || exit 91
+        rm -rf "$WT_DELETED_CWD" || exit 92
+        wt .
+      ' 2>&1
+  )
+  status=$?
+  set -e
+
+  [ "$status" -eq 0 ] || fail "zsh wt . from deleted worktree: expected success, got status $status and output: $output"
+  assert_eq "$output" "$expected" 'zsh wt . from deleted worktree emits only repo root'
+}
+
 run_test 'dot shorthand resolves repo root' test_dot_root_shorthand_resolves_repo_root
 run_test 'dash legacy root alias still resolves repo root' test_dash_legacy_root_alias_still_resolves_repo_root
 run_test 'dot shorthand resolves root from linked worktree' test_dot_root_shorthand_resolves_root_from_linked_worktree
+run_test 'zsh wrapper dot resolves root from deleted worktree without getcwd noise' test_zsh_wrapper_dot_from_deleted_worktree_resolves_root_without_getcwd_noise
 
 if [ "$failures" -ne 0 ]; then
   printf '%s test(s) failed\n' "$failures" >&2

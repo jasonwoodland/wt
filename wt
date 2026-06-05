@@ -32,7 +32,7 @@ EOF
 }
 
 find_worktrees_root() {
-  local dir="${1:-$PWD}"
+  local dir="${1:-${WT_CWD:-$PWD}}"
   local git_root main_worktree
 
   while [ "$dir" != "/" ]; do

@@ -2,19 +2,29 @@ emulate -L zsh
 
 local target="${1:-}"
 local target_path
+local wt_cwd="$PWD"
 
 if [[ "$target" == --* || "$target" == -h || "$target" =~ '^-[cfm]+$' ]]; then
-  command wt "$@"
+  (
+    builtin cd -q / || exit 1
+    WT_CWD="$wt_cwd" command wt "$@"
+  )
   return $?
 fi
 
 if [[ -z "$target" ]]; then
   if ! command -v fzf >/dev/null 2>&1; then
-    command wt
+    (
+      builtin cd -q / || exit 1
+      WT_CWD="$wt_cwd" command wt
+    )
     return $?
   fi
 
-  target_path=$(command wt) || return $?
+  target_path=$(
+    builtin cd -q / || exit 1
+    WT_CWD="$wt_cwd" command wt
+  ) || return $?
   if [[ -z "$target_path" ]]; then
     return 0
   fi
@@ -23,6 +33,9 @@ if [[ -z "$target" ]]; then
   return 0
 fi
 
-target_path=$(command wt __path "$target") || return 1
+target_path=$(
+  builtin cd -q / || exit 1
+  WT_CWD="$wt_cwd" command wt __path "$target"
+) || return 1
 cd "$target_path" || return 1
 pwd
