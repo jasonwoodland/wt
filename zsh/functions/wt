@@ -4,6 +4,27 @@ local target="${1:-}"
 local target_path
 local wt_cwd="$PWD"
 
+if [[ "$target" == --latest || "$target" == -l ]]; then
+  target_path=$(
+    builtin cd -q / || exit 1
+    WT_CWD="$wt_cwd" command wt "$@"
+  ) || return $?
+  if [[ -z "$target_path" ]]; then
+    return 0
+  fi
+  cd "$target_path" || return 1
+  pwd
+  return 0
+fi
+
+if [[ "$target" != --* && "$target" == -*l* && "$target" != -l ]]; then
+  (
+    builtin cd -q / || exit 1
+    WT_CWD="$wt_cwd" command wt "$@"
+  )
+  return $?
+fi
+
 if [[ "$target" == --* || "$target" == -h || "$target" =~ '^-[cfm]+$' ]]; then
   (
     builtin cd -q / || exit 1

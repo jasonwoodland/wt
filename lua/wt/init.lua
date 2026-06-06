@@ -382,6 +382,25 @@ local function resolve_path(branch)
 	return path, nil
 end
 
+local function latest_branch()
+	local wt, wt_err = wt_executable()
+	if not wt then
+		return nil, wt_err
+	end
+
+	local output, err = command_output({ wt, "__latest_branch" })
+	if not output then
+		return nil, err
+	end
+
+	local branch = vim.trim(output)
+	if branch == "" then
+		return nil, "No local branches found"
+	end
+
+	return branch, nil
+end
+
 local function edit_project_file(cwd, command)
 	require("telescope.builtin").find_files({
 		cwd = cwd,
@@ -1036,6 +1055,30 @@ function M.pick(opts)
 					    resolve_and_find_files(selection.value)
 				    end
 			    end)
+			    local focus_latest_selection = function()
+				    local branch, latest_err = latest_branch()
+				    if not branch then
+					    vim.notify(latest_err ~= "" and latest_err or "Could not find latest branch", vim.log.levels.ERROR)
+					    return
+				    end
+
+				    local picker = action_state.get_current_picker(prompt_bufnr)
+				    if not picker or not picker.manager then
+					    return
+				    end
+
+				    for index = 1, picker.manager:num_results() do
+					    local entry = picker.manager:get_entry(index)
+					    if entry and entry.value and entry.value.branch == branch then
+						    picker:set_selection(picker:get_row(index))
+						    return
+					    end
+				    end
+
+				    vim.notify("Latest branch '" .. branch .. "' is not visible in the current picker results", vim.log.levels.INFO)
+			    end
+			    map("i", "<C-l>", focus_latest_selection)
+			    map("n", "<C-l>", focus_latest_selection)
 			    local switch_selection = function()
 				    actions.close(prompt_bufnr)
 				    local selection = action_state.get_selected_entry()

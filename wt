@@ -7,6 +7,8 @@ Usage: wt
        wt .
        wt -
        wt <branch>
+       wt --latest
+       wt -l
        wt --clean [-f] [--merged [<rev>]]
        wt -c [-f] [--merged [<rev>]]
        wt -cm
@@ -20,6 +22,7 @@ With no arguments, wt opens an fzf picker when fzf is available.
 Use "wt ." to resolve the repo root that owns .worktrees.
 Use "wt -" as a legacy alias for "wt .".
 Use "wt <branch>" to resolve or create that branch's worktree path.
+Use "wt --latest" or "wt -l" to resolve the latest local branch by committer date.
 Use "wt --clean" or "wt -c" to remove clean non-main worktrees after confirmation.
 Use "wt -c --merged [<rev>]" or "wt -cm" to remove only clean worktrees merged into <rev>.
 When <rev> is omitted, --merged uses the root worktree HEAD.
@@ -32,7 +35,8 @@ EOF
 }
 
 find_worktrees_root() {
-  local dir="${1:-${WT_CWD:-$PWD}}"
+  local start_dir="${1:-${WT_CWD:-$PWD}}"
+  local dir="$start_dir"
   local git_root main_worktree
 
   while [ "$dir" != "/" ]; do
@@ -43,13 +47,13 @@ find_worktrees_root() {
     dir=$(dirname "$dir")
   done
 
-  main_worktree=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree / { print substr($0, 10); exit }' || true)
+  main_worktree=$(git -C "$start_dir" worktree list --porcelain 2>/dev/null | awk '/^worktree / { print substr($0, 10); exit }' || true)
   if [ -n "$main_worktree" ]; then
     printf '%s\n' "$main_worktree"
     return 0
   fi
 
-  git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  git_root=$(git -C "$start_dir" rev-parse --show-toplevel 2>/dev/null || true)
   if [ -n "$git_root" ]; then
     printf '%s\n' "$git_root"
     return 0
@@ -122,6 +126,52 @@ branch_ref_rows() {
   done
 
   git for-each-ref "${sort_args[@]}" --format='%(refname:short)%09%(objectname:short=7)' refs/heads/ 2>/dev/null
+}
+
+latest_branch() {
+  local root branch
+
+  root=$(find_worktrees_root) || {
+    echo "Could not find .worktrees directory or Git repository root." >&2
+    return 1
+  }
+  root=$(cd "$root" && pwd -P)
+
+  cd "$root"
+  branch=$(git for-each-ref --sort=-committerdate --count=1 --format='%(refname:short)' refs/heads 2>/dev/null || true)
+  if [ -z "$branch" ]; then
+    echo "No local branches found." >&2
+    return 1
+  fi
+
+  printf '%s\n' "$branch"
+}
+
+resolve_latest_path() {
+  local branch
+
+  branch=$(latest_branch) || return $?
+  resolve_path "$branch"
+}
+
+latest_usage_error() {
+  usage >&2
+  return 2
+}
+
+is_latest_mixed_short_option_token() {
+  local arg="${1:-}"
+
+  case "$arg" in
+    -|--*|-l)
+      return 1
+      ;;
+    -*l*)
+      return 0
+      ;;
+  esac
+
+  return 1
 }
 
 worktree_path_for_branch() {
@@ -711,10 +761,12 @@ _wt() {
   cur="${words[CURRENT]}"
 
   if [[ "$cur" == -* ]]; then
-    option_values=(--clean --merged -c -f -m -cf -fc -cm -mc -cfm)
+    option_values=(--latest --clean --merged -l -c -f -m -cf -fc -cm -mc -cfm)
     option_labels=(
+      "--latest  switch to the latest local branch by committer date"
       "--clean   remove clean non-main worktrees after confirmation"
       "--merged  with -c/--clean, remove only worktrees merged into an optional rev"
+      "-l        switch to the latest local branch by committer date"
       "-c        remove clean non-main worktrees after confirmation"
       "-f        skip confirmation when used with -c/--clean"
       "-m        with -c/--clean, shorthand for --merged"
@@ -811,15 +863,29 @@ case "${1:-}" in
   __list)
     list_candidates
     ;;
+  __latest_branch)
+    latest_branch
+    ;;
   __path)
     shift
     resolve_path "${1:-}"
+    ;;
+  --latest|-l)
+    shift
+    if [ "$#" -ne 0 ]; then
+      latest_usage_error
+      exit $?
+    fi
+    resolve_latest_path
     ;;
   "")
     pick_candidate
     ;;
   *)
-    if is_clean_option_token "${1:-}"; then
+    if is_latest_mixed_short_option_token "${1:-}"; then
+      latest_usage_error
+      exit $?
+    elif is_clean_option_token "${1:-}"; then
       clean_worktrees "$@"
     else
       resolve_path "$1"
