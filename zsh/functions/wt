@@ -38,7 +38,7 @@ if [[ "$target" == --branch || "$target" == -b ]]; then
   return 0
 fi
 
-if [[ "$target" == --* || "$target" == -h || "$target" =~ '^-[bcfm]+$' ]]; then
+if [[ "$target" == --* || "$target" == -h || "$target" =~ '^-[bcdfm]+$' ]]; then
   (
     builtin cd -q / || exit 1
     WT_CWD="$wt_cwd" command wt "$@"

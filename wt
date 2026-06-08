@@ -7,6 +7,7 @@ Usage: wt
        wt .
        wt -
        wt [--branch | -b] <branch>
+       wt [--delete | -d] <branch>
        wt --latest
        wt -l
        wt --clean [-f] [--merged [<rev>]]
@@ -157,6 +158,43 @@ create_branch() {
 
   git branch "$branch" >&2
   resolve_path "$branch"
+}
+
+delete_branch() {
+  local branch="$1" root worktree_path
+
+  if [ -z "$branch" ]; then
+    echo "Usage: wt --delete <branch>" >&2
+    return 2
+  fi
+
+  root=$(find_worktrees_root) || {
+    echo "Could not find .worktrees directory or Git repository root." >&2
+    return 1
+  }
+  root=$(cd "$root" && pwd -P)
+  cd "$root"
+
+  worktree_path=$(worktree_path_for_branch "$branch")
+  if [ -z "$worktree_path" ]; then
+    echo "No worktree found for branch '$branch'." >&2
+    return 1
+  fi
+
+  local worktree_abs
+  worktree_abs=$(cd "$worktree_path" && pwd -P 2>/dev/null || true)
+  if [ "$worktree_abs" = "$root" ]; then
+    echo "Cannot delete root worktree." >&2
+    return 1
+  fi
+
+  echo "Removing worktree for '$branch'..." >&2
+  git worktree remove "$worktree_path" >&2 || return $?
+
+  echo "Deleting branch '$branch'..." >&2
+  git branch -d "$branch" >&2 || return $?
+
+  printf 'Deleted branch '\''%s'\'' and removed worktree.\n' "$branch" >&2
 }
 
 resolve_latest_path() {
@@ -778,14 +816,16 @@ _wt() {
   cur="${words[CURRENT]}"
 
   if [[ "$cur" == -* ]]; then
-    option_values=(--latest --clean --merged -l -c -f -m -cf -fc -cm -mc -cfm)
+    option_values=(--latest --clean --merged --delete -l -c -f -m -d -cf -fc -cm -mc -cfm)
     option_labels=(
       "--branch  create and switch to a new branch"
       "--clean   remove clean non-main worktrees after confirmation"
+      "--delete  delete a branch and its worktree (clean and fully merged)"
       "--force   skip confirmation when used with -c/--clean"
       "--latest  switch to the latest local branch by committer date"
       "--merged  with -c/--clean, remove only worktrees merged into an optional rev"
       "-b        create and switch to a new branch"
+      "-d        delete a branch and its worktree (clean and fully merged)"
       "-c        remove clean non-main worktrees after confirmation"
       "-f        skip confirmation when used with -c/--clean"
       "-l        switch to the latest local branch by committer date"
@@ -897,6 +937,14 @@ case "${1:-}" in
       exit $?
     fi
     resolve_latest_path
+    ;;
+  --delete|-d)
+    shift
+    if [ "$#" -ne 1 ]; then
+      branch_usage_error
+      exit $?
+    fi
+    delete_branch "$1"
     ;;
   --branch|-b)
     shift
