@@ -25,7 +25,20 @@ if [[ "$target" != --* && "$target" == -*l* && "$target" != -l ]]; then
   return $?
 fi
 
-if [[ "$target" == --* || "$target" == -h || "$target" =~ '^-[cfm]+$' ]]; then
+if [[ "$target" == --branch || "$target" == -b ]]; then
+  target_path=$(
+    builtin cd -q / || exit 1
+    WT_CWD="$wt_cwd" command wt "$@"
+  ) || return $?
+  if [[ -z "$target_path" ]]; then
+    return 0
+  fi
+  cd "$target_path" || return 1
+  pwd
+  return 0
+fi
+
+if [[ "$target" == --* || "$target" == -h || "$target" =~ '^-[bcfm]+$' ]]; then
   (
     builtin cd -q / || exit 1
     WT_CWD="$wt_cwd" command wt "$@"

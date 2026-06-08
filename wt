@@ -6,7 +6,7 @@ usage() {
 Usage: wt
        wt .
        wt -
-       wt <branch>
+       wt [--branch | -b] <branch>
        wt --latest
        wt -l
        wt --clean [-f] [--merged [<rev>]]
@@ -22,6 +22,7 @@ With no arguments, wt opens an fzf picker when fzf is available.
 Use "wt ." to resolve the repo root that owns .worktrees.
 Use "wt -" as a legacy alias for "wt .".
 Use "wt <branch>" to resolve or create that branch's worktree path.
+Use "wt --branch <branch>" or "wt -b <branch>" to create a branch and resolve that branch's worktree path.
 Use "wt --latest" or "wt -l" to resolve the latest local branch by committer date.
 Use "wt --clean" or "wt -c" to remove clean non-main worktrees after confirmation.
 Use "wt -c --merged [<rev>]" or "wt -cm" to remove only clean worktrees merged into <rev>.
@@ -147,6 +148,17 @@ latest_branch() {
   printf '%s\n' "$branch"
 }
 
+create_branch() {
+  local branch="$1" root
+
+  root=$(find_worktrees_root) || return $?
+  root=$(cd "$root" && pwd -P)
+  cd "$root"
+
+  git branch "$branch" >&2
+  resolve_path "$branch"
+}
+
 resolve_latest_path() {
   local branch
 
@@ -172,6 +184,11 @@ is_latest_mixed_short_option_token() {
   esac
 
   return 1
+}
+
+branch_usage_error() {
+  usage >&2
+  return 2
 }
 
 worktree_path_for_branch() {
@@ -271,10 +288,7 @@ worktree_is_clean() {
 
 clean_usage() {
   cat >&2 <<'EOF'
-Usage: wt --clean [-f] [--merged [<rev>]]
-       wt -c [-f] [--merged [<rev>]]
-       wt -cm
-       wt -cfm
+Usage: wt [--clean | -c] [--force | -f] [--merged | -m [<rev>]]
 EOF
 }
 
@@ -337,6 +351,9 @@ clean_worktrees() {
     case "$arg" in
       --clean)
         clean_requested=1
+        ;;
+      --force)
+        no_confirm=1
         ;;
       --merged=*)
         merged_only=1
@@ -763,12 +780,15 @@ _wt() {
   if [[ "$cur" == -* ]]; then
     option_values=(--latest --clean --merged -l -c -f -m -cf -fc -cm -mc -cfm)
     option_labels=(
-      "--latest  switch to the latest local branch by committer date"
+      "--branch  create and switch to a new branch"
       "--clean   remove clean non-main worktrees after confirmation"
+      "--force   skip confirmation when used with -c/--clean"
+      "--latest  switch to the latest local branch by committer date"
       "--merged  with -c/--clean, remove only worktrees merged into an optional rev"
-      "-l        switch to the latest local branch by committer date"
+      "-b        create and switch to a new branch"
       "-c        remove clean non-main worktrees after confirmation"
       "-f        skip confirmation when used with -c/--clean"
+      "-l        switch to the latest local branch by committer date"
       "-m        with -c/--clean, shorthand for --merged"
       "-cf       remove clean non-main worktrees without confirmation"
       "-fc       remove clean non-main worktrees without confirmation"
@@ -877,6 +897,14 @@ case "${1:-}" in
       exit $?
     fi
     resolve_latest_path
+    ;;
+  --branch|-b)
+    shift
+    if [ "$#" -ne 1 ]; then
+      branch_usage_error
+      exit $?
+    fi
+    create_branch "$1"
     ;;
   "")
     pick_candidate
