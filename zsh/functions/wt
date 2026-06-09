@@ -38,7 +38,26 @@ if [[ "$target" == --branch || "$target" == -b ]]; then
   return 0
 fi
 
-if [[ "$target" == --* || "$target" == -h || "$target" =~ '^-[bcdfm]+$' ]]; then
+if [[ "$target" == --move || "$target" == -M ]]; then
+  local output old_path new_path rel
+  output=$(
+    builtin cd -q / || exit 1
+    WT_CWD="$wt_cwd" command wt "$@"
+  ) || return $?
+  if [[ -z "$output" ]]; then
+    return 0
+  fi
+  old_path="${output%%$'\n'*}"
+  new_path="${output#*$'\n'}"
+  if [[ -n "$new_path" && ("$wt_cwd" == "$old_path" || "$wt_cwd" == "$old_path"/*) ]]; then
+    rel="${wt_cwd#$old_path}"
+    cd "${new_path}${rel}" || return 1
+    pwd
+  fi
+  return 0
+fi
+
+if [[ "$target" == --* || "$target" == -h || "$target" =~ '^-[bcdfmM]+$' ]]; then
   (
     builtin cd -q / || exit 1
     WT_CWD="$wt_cwd" command wt "$@"

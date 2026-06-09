@@ -8,6 +8,7 @@ Usage: wt
        wt -
        wt [--branch | -b] <branch>
        wt [--delete | -d] <branch>
+       wt [--move | -M] [<oldbranch>] <newbranch>
        wt --latest
        wt -l
        wt --clean [-f] [--merged [<rev>]]
@@ -158,6 +159,75 @@ create_branch() {
 
   git branch "$branch" >&2
   resolve_path "$branch"
+}
+
+move_branch() {
+  local old_branch="${1:-}" new_branch="${2:-}" root root_physical old_path new_path has_worktree
+
+  if [ -z "$new_branch" ]; then
+    echo "Usage: wt --move [<oldbranch>] <newbranch>" >&2
+    return 2
+  fi
+
+  root=$(find_worktrees_root) || {
+    echo "Could not find .worktrees directory or Git repository root." >&2
+    return 1
+  }
+  root_physical=$(cd "$root" && pwd -P)
+
+  # Default old branch to HEAD (use user's original cwd, not root)
+  if [ -z "$old_branch" ]; then
+    if [ -n "${WT_CWD:-}" ]; then
+      old_branch=$(git -C "$WT_CWD" branch --show-current 2>/dev/null || true)
+    else
+      old_branch=$(git branch --show-current 2>/dev/null || true)
+    fi
+    if [ -z "$old_branch" ]; then
+      echo "Not on a branch and no <oldbranch> given." >&2
+      return 1
+    fi
+  fi
+
+  cd "$root_physical"
+
+  # Validate old branch exists
+  if ! git show-ref --verify --quiet "refs/heads/$old_branch"; then
+    echo "Branch '$old_branch' does not exist." >&2
+    return 1
+  fi
+
+  # Validate new branch does not exist
+  if git show-ref --verify --quiet "refs/heads/$new_branch"; then
+    echo "Branch '$new_branch' already exists." >&2
+    return 1
+  fi
+
+  # Check if a linked worktree exists (use git's stored path for the check)
+  old_path=$(worktree_path_for_branch "$old_branch")
+  has_worktree=0
+  if [ -n "$old_path" ] && [ "$old_path" != "$root_physical" ]; then
+    has_worktree=1
+  fi
+
+  # Rename the branch
+  echo "Renaming branch '$old_branch' to '$new_branch'..." >&2
+  git branch -m "$old_branch" "$new_branch" >&2 || return $?
+
+  if [ "$has_worktree" = 1 ]; then
+    # Use git's stored paths for git worktree move (canonical),
+    # but output logical paths for the zsh function
+    new_git_path="${old_path%/*}/$new_branch"
+    echo "Moving worktree to '$new_git_path'..." >&2
+    if ! git worktree move "$old_path" "$new_git_path" >&2; then
+      # Rollback: rename the branch back
+      echo "Worktree move failed, rolling back branch rename..." >&2
+      git branch -m "$new_branch" "$old_branch" >&2 || true
+      return 1
+    fi
+    # Output logical paths (from find_worktrees_root) for zsh cd comparison
+    printf '%s\n' "$root/.worktrees/$old_branch"
+    printf '%s\n' "$root/.worktrees/$new_branch"
+  fi
 }
 
 delete_branch() {
@@ -816,16 +886,18 @@ _wt() {
   cur="${words[CURRENT]}"
 
   if [[ "$cur" == -* ]]; then
-    option_values=(--latest --clean --merged --delete -l -c -f -m -d -cf -fc -cm -mc -cfm)
+    option_values=(--latest --clean --merged --delete --move -l -c -f -m -d -M -cf -fc -cm -mc -cfm)
     option_labels=(
       "--branch  create and switch to a new branch"
       "--clean   remove clean non-main worktrees after confirmation"
       "--delete  delete a branch and its worktree (clean and fully merged)"
+      "--move    rename a branch and move its worktree"
       "--force   skip confirmation when used with -c/--clean"
       "--latest  switch to the latest local branch by committer date"
       "--merged  with -c/--clean, remove only worktrees merged into an optional rev"
       "-b        create and switch to a new branch"
       "-d        delete a branch and its worktree (clean and fully merged)"
+      "-M        rename a branch and move its worktree"
       "-c        remove clean non-main worktrees after confirmation"
       "-f        skip confirmation when used with -c/--clean"
       "-l        switch to the latest local branch by committer date"
@@ -937,6 +1009,18 @@ case "${1:-}" in
       exit $?
     fi
     resolve_latest_path
+    ;;
+  --move|-M)
+    shift
+    if [ "$#" -eq 0 ] || [ "$#" -gt 2 ]; then
+      branch_usage_error
+      exit $?
+    fi
+    if [ "$#" -eq 1 ]; then
+      move_branch "" "$1"
+    else
+      move_branch "$1" "$2"
+    fi
     ;;
   --delete|-d)
     shift
