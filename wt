@@ -3,37 +3,45 @@ set -eo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: wt
+Usage: wt [options] [<branch>]
        wt .
-       wt -
-       wt [--branch | -b] <branch>
-       wt [--delete | -d] <branch>
-       wt [--move | -M] [<oldbranch>] <newbranch>
-       wt --latest
-       wt -l
-       wt --clean [-f] [--merged [<rev>]]
-       wt -c [-f] [--merged [<rev>]]
-       wt -cm
-       wt -cfm
-       wt --help
-       wt --zsh-completion
-       wt __list
-       wt __path <target>
+       wt -M [<oldbranch>] <newbranch>
 
-With no arguments, wt opens an fzf picker when fzf is available.
-Use "wt ." to resolve the repo root that owns .worktrees.
-Use "wt -" as a legacy alias for "wt .".
-Use "wt <branch>" to resolve or create that branch's worktree path.
-Use "wt --branch <branch>" or "wt -b <branch>" to create a branch and resolve that branch's worktree path.
-Use "wt --latest" or "wt -l" to resolve the latest local branch by committer date.
-Use "wt --clean" or "wt -c" to remove clean non-main worktrees after confirmation.
-Use "wt -c --merged [<rev>]" or "wt -cm" to remove only clean worktrees merged into <rev>.
-When <rev> is omitted, --merged uses the root worktree HEAD.
-Use "wt -cf" or "wt -cfm" to skip the confirmation prompt. -f never forces dirty worktree removal.
+Switch between Git worktrees. With no arguments, open an fzf picker, or list
+worktrees and local branches when fzf is unavailable.
 
-wt is normally used through its zsh autoload function so it can change the
-current shell directory. The executable prints paths for shell, completion, and
-Neovim integrations.
+Arguments:
+  <branch>                  Switch to the branch's worktree, creating it if needed.
+  .                         Switch to the repo root that owns .worktrees.
+  -                         Legacy alias for .
+
+Options:
+  -b, --branch <branch>      Create a branch from the root HEAD and switch to it.
+  -c, --clean                Remove clean non-main worktrees after confirmation.
+  -d, --delete <branch>      Remove the clean worktree, then delete the branch
+                            if Git considers it fully merged.
+  -f, --force                With --clean, skip confirmation.
+  -h, --help                 Show this help.
+  -l, --latest               Switch to the latest local branch by committer date.
+  -m, --merged [<rev>]       With --clean, only remove worktrees merged into <rev>.
+                            Defaults to the root worktree HEAD.
+  -M, --move [<old>] <new>    Rename a branch and move its worktree, if one exists.
+                            <old> defaults to the current branch.
+      --zsh-completion      Print the zsh completion definition.
+
+Cleanup never removes dirty worktrees, even with --force. The short cleanup
+options -c, -f, and -m can be combined.
+
+Examples:
+  wt feature/login          Switch to an existing branch's worktree.
+  wt -b feature/search      Create a branch and switch to its worktree.
+  wt -M feature/find        Rename the current branch and move its worktree.
+  wt -cm                    Remove clean worktrees merged into the root HEAD.
+  wt -cfm                   Do the same without confirmation.
+  wt -c --merged main       Remove clean worktrees merged into main.
+
+The zsh function changes the current shell directory. When called directly,
+the executable prints the destination path for navigation commands.
 EOF
 }
 
