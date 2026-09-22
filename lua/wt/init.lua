@@ -962,6 +962,15 @@ function M.pick(opts)
 		max_branch_width = math.max(max_branch_width, #(candidate.branch_display or candidate.branch))
 	end
 
+	local displayer = entry_display.create({
+		separator = " ",
+		items = {
+			{ width = max_sha_width },
+			{ width = max_branch_width },
+			{ remaining = true },
+		},
+	})
+
 	pickers
 	    .new(opts, {
 		    prompt_title = "Worktrees",
@@ -992,15 +1001,6 @@ function M.pick(opts)
 		    finder = finders.new_table({
 			    results = candidates,
 			    entry_maker = function(entry)
-				    local displayer = entry_display.create({
-					    separator = " ",
-					    items = {
-						    { width = max_sha_width },
-						    { width = max_branch_width },
-						    { remaining = true },
-					    },
-				    })
-
 				    return {
 					    value = entry,
 					    branch = entry.branch,

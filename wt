@@ -616,12 +616,8 @@ clean_worktrees() {
 }
 
 list_candidates() {
-  local root root_branch_name root_sha branch path row seen_branches sha
-  local branch_row sorted_branch sort_value branch_sort_configured
-  local -a worktree_rows branches branch_sort_values
-
-  seen_branches=""
-  branch_sort_configured=0
+  local root root_branch_name root_sha branch path sha sort_value
+  local -a branch_sort_values
 
   root=$(find_worktrees_root) || {
     echo "Could not find .worktrees directory or Git repository root." >&2
@@ -635,77 +631,57 @@ list_candidates() {
 
   if [ -n "$root_branch_name" ]; then
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$root_branch_name" "$root" root root 0 "$root_sha"
-    seen_branches="${seen_branches}${root_branch_name}"$'\n'
   fi
-
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    worktree_rows+=("$row")
-  done < <(worktree_branch_rows)
 
   while IFS= read -r sort_value; do
     [ -n "$sort_value" ] || continue
     branch_sort_values+=("$sort_value")
   done < <(git config --get-all branch.sort 2>/dev/null || true)
 
-  if [ "${#branch_sort_values[@]}" -gt 0 ]; then
-    branch_sort_configured=1
-  fi
-
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    branches+=("$row")
-  done < <(branch_ref_rows "${branch_sort_values[@]}")
-
-  if [ "$branch_sort_configured" = 1 ]; then
-    for branch_row in "${branches[@]}"; do
-      [ -n "$branch_row" ] || continue
-      sorted_branch=${branch_row%%$'\t'*}
-      [ -n "$sorted_branch" ] || continue
-
-      for row in "${worktree_rows[@]}"; do
-        [ -n "$row" ] || continue
-        branch=${row%%$'\t'*}
-        row=${row#*$'\t'}
-        path=${row%%$'\t'*}
-        sha=${row#*$'\t'}
-        [ "$branch" = "$sorted_branch" ] || continue
-        [ -n "$path" ] || break
-        is_existing_worktree_path "$path" || break
-        if ! list_contains "$branch" "$seen_branches"; then
-          seen_branches="${seen_branches}${branch}"$'\n'
-          printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$branch" "$path" worktree worktree 0 "$sha"
-        fi
-        break
-      done
-    done
-  else
-    for row in "${worktree_rows[@]}"; do
-      [ -n "$row" ] || continue
-      branch=${row%%$'\t'*}
-      row=${row#*$'\t'}
-      path=${row%%$'\t'*}
-      sha=${row#*$'\t'}
-      [ -n "$branch" ] || continue
-      [ -n "$path" ] || continue
-      is_existing_worktree_path "$path" || continue
-      list_contains "$branch" "$seen_branches" && continue
-      seen_branches="${seen_branches}${branch}"$'\n'
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$branch" "$path" worktree worktree 0 "$sha"
-    done
-  fi
-
-  for row in "${branches[@]}"; do
-    [ -n "$row" ] || continue
-    branch=${row%%$'\t'*}
-    sha=${row#*$'\t'}
-    [ -n "$branch" ] || continue
-    list_contains "$branch" "$seen_branches" && continue
-    seen_branches="${seen_branches}${branch}"$'\n'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$branch" "" branch branch 1 "$sha"
-  done
-
-  return 0
+  # Join the two snapshots once, rather than spawning grep for every branch
+  # and scanning every worktree again for each sorted branch (O(B * W)).
+  awk -F '\t' -v root_branch="$root_branch_name" -v sorted="${#branch_sort_values[@]}" '
+    BEGIN { OFS = "\t"; if (root_branch != "") seen["b:" root_branch] = 1 }
+    function emit_worktree(key) {
+      if (!(key in seen) && key in paths) {
+        print names[key], paths[key], "worktree", "worktree", 0, shas[key]
+        seen[key] = 1
+      }
+    }
+    FILENAME == ARGV[1] {
+      key = "b:" $1
+      if (!(key in paths)) {
+        worktrees[++worktree_count] = key
+        names[key] = $1; paths[key] = $2; shas[key] = $3
+      }
+      next
+    }
+    {
+      branches[++branch_count] = $1
+      branch_shas[branch_count] = $2
+    }
+    END {
+      if (sorted) {
+        for (i = 1; i <= branch_count; i++) emit_worktree("b:" branches[i])
+      } else {
+        for (i = 1; i <= worktree_count; i++) emit_worktree(worktrees[i])
+      }
+      for (i = 1; i <= branch_count; i++) {
+        key = "b:" branches[i]
+        if (!(key in seen)) {
+          print branches[i], "", "branch", "branch", 1, branch_shas[i]
+          seen[key] = 1
+        }
+      }
+    }
+  ' <(
+    while IFS=$'\t' read -r branch path sha; do
+      # Git supplied these registered paths. Ignore missing worktrees without
+      # launching another Git process for each one. Resolution still validates.
+      [ -d "$path" ] && [ -e "$path/.git" ] || continue
+      printf '%s\t%s\t%s\n' "$branch" "$path" "$sha"
+    done < <(worktree_branch_rows)
+  ) <(branch_ref_rows "${branch_sort_values[@]}")
 }
 
 resolve_path() {
@@ -821,6 +797,7 @@ _wt() {
   local -a values labels option_values option_labels
   local -a active_values active_labels normal_values normal_labels
   local line branch worktree_path kind label sort sha formatted_label display_path root_path cur wt_rows branch_label
+  local REPLY
   local -a fields filtered_values filtered_labels
   local branch_width sha_width max_branch_width=0 max_sha_width=0 i
 
@@ -848,19 +825,19 @@ _wt() {
     local i j
 
     if [[ -z "$path" ]]; then
-      print -r -- ""
+      REPLY=""
       return
     fi
     if [[ -n "$root" && "$path" == "$root" ]]; then
-      print -r -- "."
+      REPLY="."
       return
     fi
     if [[ -n "$root" && "$root" != "/" && "$path" == "$root"/* ]]; then
-      print -r -- "${path#$root/}"
+      REPLY="${path#$root/}"
       return
     fi
     if [[ "$root" == "/" && "$path" == /* ]]; then
-      print -r -- "${path#/}"
+      REPLY="${path#/}"
       return
     fi
     if [[ -n "$root" && "$path" == /* && "$root" == /* ]]; then
@@ -876,11 +853,11 @@ _wt() {
       for ((j = i; j <= ${#path_parts}; j++)); do
         [[ -n "${path_parts[j]}" ]] && rel="${rel:+$rel/}${path_parts[j]}"
       done
-      print -r -- "${rel:-.}"
+      REPLY="${rel:-.}"
       return
     fi
 
-    print -r -- "$path"
+    REPLY="$path"
   }
 
   cur="${words[CURRENT]}"
@@ -946,13 +923,14 @@ _wt() {
     sha="$fields[6]"
     [[ -n "$branch" ]] || continue
 
-    display_path=$(_wt_display_path "$worktree_path" "$root_path")
+    _wt_display_path "$worktree_path" "$root_path"
+    display_path="$REPLY"
     branch_label="$branch"
 
     if [[ -z "$display_path" ]]; then
-      formatted_label=$(printf "%-${max_sha_width}s %s" "$sha" "$branch_label")
+      printf -v formatted_label "%-${max_sha_width}s %s" "$sha" "$branch_label"
     else
-      formatted_label=$(printf "%-${max_sha_width}s %-${max_branch_width}s %s" "$sha" "$branch_label" "$display_path")
+      printf -v formatted_label "%-${max_sha_width}s %-${max_branch_width}s %s" "$sha" "$branch_label" "$display_path"
     fi
 
     if [[ "$sort" == 0 ]]; then
