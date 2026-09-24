@@ -341,6 +341,9 @@ local function parse_rows(output)
 		local root = root_path or row.path:match("^(.-)/%.worktrees/") or vim.fn.getcwd()
 		row.root = root
 		row.display_path = display_path_for_root(row.path, root)
+		if row.label == "detached" then
+			row.branch_display = "(detached)"
+		end
 	end
 
 	return rows
@@ -994,8 +997,10 @@ function M.pick(opts)
 					    return
 				    end
 
-				    preview_git_log(self.state.bufnr, self.state.winid, entry.value.root,
-					    entry.value.branch)
+				    local detached = entry.value.label == "detached"
+				    preview_git_log(self.state.bufnr, self.state.winid,
+					    detached and entry.value.path or entry.value.root,
+					    detached and "HEAD" or entry.value.branch)
 			    end,
 		    }),
 		    finder = finders.new_table({

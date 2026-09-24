@@ -241,7 +241,7 @@ package.preload["telescope.pickers"] = function()
 					assert_true(mapped["n<C-l>"], "expected normal-mode <C-l> mapping")
 
 					mapped[(scenario.mode or "i") .. "<C-l>"]()
-					scenario.after(entries, picker)
+					scenario.after(entries, picker, spec)
 				end,
 			}
 		end,
@@ -315,6 +315,37 @@ local function test_filtered_out_latest_notifies_and_preserves_selection()
 	})
 end
 
+local function test_detached_worktree_selection_and_preview()
+	local root = make_repo()
+	local path = root .. "/.worktrees/eval/121 baseline"
+	run("git worktree add -q --detach " .. vim.fn.shellescape(path) .. " HEAD", root)
+	commit_file(path, "detached", "2020-01-02T00:00:00 +0000", "detached preview commit")
+	vim.cmd("cd " .. esc(root))
+
+	run_pick_scenario({
+		after = function(entries, _, spec)
+			local detached
+			for _, entry in ipairs(entries) do
+				if entry.value.path == path then detached = entry end
+			end
+			assert_true(detached, "detached worktree should be listed")
+			assert_eq(detached.value.branch_display, "(detached)", "detached display label")
+			assert_eq(detached.value.display_path, ".worktrees/eval/121 baseline", "detached directory display")
+			local buf = vim.api.nvim_create_buf(false, true)
+			spec.previewer.define_preview({ state = { bufnr = buf } }, detached)
+			assert_true(vim.wait(5000, function() return vim.b[buf].wt_git_log_loaded end), "preview should finish")
+			local preview = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+			assert_true(preview:find("detached preview commit", 1, true), "preview should use detached HEAD")
+			vim.api.nvim_buf_delete(buf, { force = true })
+			telescope_state.selection = detached
+			require("telescope.actions").select_default.fn()
+			assert_eq(normalize(vim.fn.getcwd()), path, "selection should open detached directory")
+			assert_eq(vim.trim(run("git branch --show-current", path)), "", "selection must leave HEAD detached")
+		end,
+	})
+end
+
+test_detached_worktree_selection_and_preview()
 test_focuses_visible_latest_branch_without_switching()
 test_focuses_root_row_when_root_branch_is_latest()
 test_filtered_out_latest_notifies_and_preserves_selection()

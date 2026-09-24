@@ -32,6 +32,8 @@ autoload -Uz wt
 
 The worktree picker lists existing worktrees and local branches as `{sha}  {branch name}  {relative worktree path}`. The path is shown only for existing worktrees, including worktrees outside `.worktrees`; branch-only rows omit the path. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
 
+Detached worktrees appear as `{sha}  (detached)  {relative worktree path}` in both pickers and shell completion. Selecting one opens its existing directory without creating or attaching a branch. Completion inserts its absolute path; you can also use `wt /absolute/path/to/worktree` directly. With `branch.sort` configured, detached worktrees follow branch-attached worktrees and precede branch-only rows.
+
 ```lua
 require("wt").setup({ key = "<Space>w" })
 ```

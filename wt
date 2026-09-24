@@ -3,7 +3,7 @@ set -eo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: wt [options] [<branch>]
+Usage: wt [options] [<branch> | <path>]
        wt .
        wt -M [<oldbranch>] <newbranch>
 
@@ -12,6 +12,7 @@ worktrees and local branches when fzf is unavailable.
 
 Arguments:
   <branch>                  Switch to the branch's worktree, creating it if needed.
+  <path>                    Switch to a registered worktree by absolute path.
   .                         Switch to the repo root that owns .worktrees.
 
 Options:
@@ -93,15 +94,20 @@ is_existing_worktree_path() {
 }
 
 worktree_branch_rows() {
+  local include_detached=0
+  [ "${1:-}" != --include-detached ] || include_detached=1
   git worktree list --porcelain 2>/dev/null |
-    awk '
+    awk -v include_detached="$include_detached" '
       function short_sha(value) {
         return substr(value, 1, 7)
       }
       function flush() {
         if (path != "" && branch != "") {
           print branch "\t" path "\t" short_sha(head)
+        } else if (path != "" && detached && include_detached) {
+          print path "\t" path "\t" short_sha(head) "\tdetached"
         }
+        detached = 0
         path = ""
         branch = ""
         head = ""
@@ -121,6 +127,7 @@ worktree_branch_rows() {
         branch = substr($0, 19)
         next
       }
+      /^detached$/ { detached = 1 }
       /^$/ { flush() }
       END { flush() }
     '
@@ -623,7 +630,7 @@ clean_worktrees() {
 }
 
 list_candidates() {
-  local root root_branch_name root_sha branch path sha sort_value
+  local root root_branch_name root_sha branch path sha sort_value state
   local -a branch_sort_values
 
   root=$(find_worktrees_root) || {
@@ -638,6 +645,8 @@ list_candidates() {
 
   if [ -n "$root_branch_name" ]; then
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$root_branch_name" "$root" root root 0 "$root_sha"
+  elif [ -n "$root_sha" ]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$root" "$root" root detached 0 "$root_sha"
   fi
 
   while IFS= read -r sort_value; do
@@ -647,19 +656,22 @@ list_candidates() {
 
   # Join the two snapshots once, rather than spawning grep for every branch
   # and scanning every worktree again for each sorted branch (O(B * W)).
-  awk -F '\t' -v root_branch="$root_branch_name" -v sorted="${#branch_sort_values[@]}" '
+  awk -F '\t' -v root_branch="$root_branch_name" -v root_path="$root" -v sorted="${#branch_sort_values[@]}" '
     BEGIN { OFS = "\t"; if (root_branch != "") seen["b:" root_branch] = 1 }
     function emit_worktree(key) {
       if (!(key in seen) && key in paths) {
-        print names[key], paths[key], "worktree", "worktree", 0, shas[key]
+        print names[key], paths[key], "worktree", labels[key], 0, shas[key]
         seen[key] = 1
       }
     }
     FILENAME == ARGV[1] {
-      key = "b:" $1
+      if ($2 == root_path) next
+      key = ($4 == "detached" ? "d:" : "b:") $1
+      if ($4 == "detached") detached[++detached_count] = key
       if (!(key in paths)) {
         worktrees[++worktree_count] = key
         names[key] = $1; paths[key] = $2; shas[key] = $3
+        labels[key] = ($4 == "detached" ? "detached" : "worktree")
       }
       next
     }
@@ -670,6 +682,7 @@ list_candidates() {
     END {
       if (sorted) {
         for (i = 1; i <= branch_count; i++) emit_worktree("b:" branches[i])
+        for (i = 1; i <= detached_count; i++) emit_worktree(detached[i])
       } else {
         for (i = 1; i <= worktree_count; i++) emit_worktree(worktrees[i])
       }
@@ -682,12 +695,12 @@ list_candidates() {
       }
     }
   ' <(
-    while IFS=$'\t' read -r branch path sha; do
+    while IFS=$'\t' read -r branch path sha state; do
       # Git supplied these registered paths. Ignore missing worktrees without
       # launching another Git process for each one. Resolution still validates.
       [ -d "$path" ] && [ -e "$path/.git" ] || continue
-      printf '%s\t%s\t%s\n' "$branch" "$path" "$sha"
-    done < <(worktree_branch_rows)
+      printf '%s\t%s\t%s\t%s\n' "$branch" "$path" "$sha" "$state"
+    done < <(worktree_branch_rows --include-detached)
   ) <(branch_ref_rows "${branch_sort_values[@]}")
 }
 
@@ -713,6 +726,19 @@ resolve_path() {
     return 0
   fi
 
+  # Detached candidates use their registered absolute path as an unambiguous
+  # target, even if a branch has the same name as the worktree directory.
+  if [[ "$target" == /* ]]; then
+    while IFS=$'\t' read -r path _; do
+      [ "$path" = "$target" ] || continue
+      is_existing_worktree_path "$path" || continue
+      printf '%s\n' "$path"
+      return 0
+    done < <(worktree_rows)
+    echo "No existing worktree found at '$target'." >&2
+    return 1
+  fi
+
   worktree_dir="$root/.worktrees/$target"
 
   path=$(worktree_path_for_branch "$target")
@@ -735,7 +761,7 @@ resolve_path() {
 }
 
 format_rows() {
-  awk -F '\t' '
+  awk -F '\t' -v with_target="${1:-0}" '
     function display_path(path,    npath, nroot, path_parts, root_parts, common, i, out) {
       if (path == "") return ""
       if (root_path != "" && path == root_path) return "."
@@ -762,11 +788,13 @@ format_rows() {
         split(rows[i], f, "\t")
         shown_path[i] = display_path(f[2])
         sha_label[i] = f[6]
-        branch_label[i] = f[1]
+        targets[i] = f[1]
+        branch_label[i] = (f[4] == "detached" ? "(detached)" : f[1])
         if (length(sha_label[i]) > sha_width) sha_width = length(sha_label[i])
         if (length(branch_label[i]) > branch_width) branch_width = length(branch_label[i])
       }
       for (i = 1; i <= NR; i++) {
+        if (with_target) printf "%s\t", targets[i]
         if (shown_path[i] == "") {
           printf "%-" sha_width "s %s\n", sha_label[i], branch_label[i]
         } else {
@@ -787,8 +815,8 @@ pick_candidate() {
   fi
 
   if command -v fzf >/dev/null 2>&1; then
-    selection=$(printf '%s\n' "$rows" | format_rows | fzf --height=~50%) || return 130
-    branch=$(printf '%s\n' "$selection" | awk '{ print $2 }')
+    selection=$(printf '%s\n' "$rows" | format_rows 1 | fzf --height=~50% --delimiter=$'\t' --with-nth=2..) || return 130
+    branch=${selection%%$'\t'*}
     [ -n "$branch" ] || return 1
     resolve_path "$branch"
   else
@@ -914,6 +942,7 @@ _wt() {
     [[ -n "$branch" ]] || continue
     sha="$fields[6]"
     branch_label="$branch"
+    [[ "$fields[4]" != detached ]] || branch_label="(detached)"
     sha_width=${#sha}
     branch_width=${#branch_label}
     (( sha_width > max_sha_width )) && max_sha_width=$sha_width
@@ -933,6 +962,7 @@ _wt() {
     _wt_display_path "$worktree_path" "$root_path"
     display_path="$REPLY"
     branch_label="$branch"
+    [[ "$fields[4]" != detached ]] || branch_label="(detached)"
 
     if [[ -z "$display_path" ]]; then
       printf -v formatted_label "%-${max_sha_width}s %s" "$sha" "$branch_label"
@@ -960,9 +990,9 @@ _wt() {
       fi
     done
 
-    (( ${#filtered_values} > 0 )) && compadd -U -Q -V wt-branches -d filtered_labels -l -- "${filtered_values[@]}"
+    (( ${#filtered_values} > 0 )) && compadd -U -V wt-branches -d filtered_labels -l -- "${filtered_values[@]}"
   else
-    (( ${#values} > 0 )) && compadd -Q -V wt-branches -d labels -l -- "${values[@]}"
+    (( ${#values} > 0 )) && compadd -V wt-branches -d labels -l -- "${values[@]}"
   fi
 }
 
