@@ -4,17 +4,46 @@ Shell utility and [telescope.nvim](https://github.com/nvim-telescope/telescope.n
 
 ## Shell usage
 
-```sh
-wt              # open the interactive picker when fzf is available
-wt .            # cd to the repo root that owns .worktrees
-wt <branch>     # cd to the branch's existing worktree, or create .worktrees/<branch>
-wt --latest     # cd to the local branch/worktree with the newest committer date
-wt -l           # shorthand for wt --latest
-wt --clean      # remove clean non-main worktrees after confirmation
-wt -c --merged  # remove clean non-main worktrees merged into the root worktree HEAD
-wt -cm          # shorthand for wt -c --merged
-wt -cfm         # remove clean merged non-main worktrees without confirmation
-wt -cf          # remove clean non-main worktrees without confirmation
+```text
+Usage: wt [options] [<branch> | <path>]
+       wt .
+       wt -M [<oldbranch>] <newbranch>
+
+Switch between Git worktrees. With no arguments, open an fzf picker, or list
+worktrees and local branches when fzf is unavailable.
+
+Arguments:
+  <branch>                  Switch to the branch's worktree, creating it if needed.
+  <path>                    Switch to a registered worktree by absolute path.
+  .                         Switch to the repo root that owns .worktrees.
+
+Options:
+  -b, --branch <branch>      Create a branch from the root HEAD and switch to it.
+  -c, --clean                Remove clean non-main worktrees after confirmation.
+  -d, --delete <branch>      Remove the clean worktree, then delete the branch
+                            if Git considers it fully merged.
+  -f, --force                With --clean, skip confirmation.
+  -h, --help                 Show this help.
+  -l, --latest               Switch to the latest local branch by committer date.
+  -m, --merged [<rev>]       With --clean, only remove worktrees merged into <rev>.
+                            Defaults to the root worktree HEAD.
+  -M, --move [<old>] <new>    Rename a branch and move its worktree, if one exists.
+                            <old> defaults to the current branch.
+      --zsh-completion      Print the zsh completion definition.
+
+Cleanup never removes dirty worktrees, even with --force. The short cleanup
+options -c, -f, and -m can be combined.
+
+Examples:
+  wt feature/login          Switch to an existing branch's worktree.
+  wt -b feature/search      Create a branch and switch to its worktree.
+  wt -M feature/find        Rename the current branch and move its worktree.
+  wt -cm                    Remove clean worktrees merged into the root HEAD.
+  wt -cfm                   Do the same without confirmation.
+  wt -c --merged main       Remove clean worktrees merged into main.
+
+The zsh function changes the current shell directory. When called directly,
+the executable prints the destination path for navigation commands.
 ```
 
 ## Installation
