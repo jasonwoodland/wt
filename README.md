@@ -7,7 +7,6 @@ Shell utility and [telescope.nvim](https://github.com/nvim-telescope/telescope.n
 ```sh
 wt              # open the interactive picker when fzf is available
 wt .            # cd to the repo root that owns .worktrees
-wt -            # legacy alias for wt .
 wt <branch>     # cd to the branch's existing worktree, or create .worktrees/<branch>
 wt --latest     # cd to the local branch/worktree with the newest committer date
 wt -l           # shorthand for wt --latest

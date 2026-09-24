@@ -85,12 +85,18 @@ test_dot_root_shorthand_resolves_repo_root() {
   assert_command_resolves_root "$repo" "$repo" 'wt __path .' __path .
 }
 
-test_dash_legacy_root_alias_still_resolves_repo_root() {
-  local repo
+test_dash_is_not_a_root_alias() {
+  local repo output
   repo=$(make_repo)
 
-  assert_command_resolves_root "$repo" "$repo" 'wt -' -
-  assert_command_resolves_root "$repo" "$repo" 'wt __path -' __path -
+  if output=$(cd "$repo" && "$WT" - 2>"$SUITE_TMP/dash.stderr"); then
+    fail 'wt - should fail'
+  fi
+  assert_eq "$output" '' 'wt - emits no destination'
+  if output=$(cd "$repo" && "$WT" __path - 2>"$SUITE_TMP/dash.stderr"); then
+    fail 'wt __path - should fail'
+  fi
+  assert_eq "$output" '' 'wt __path - emits no destination'
 }
 
 test_dot_root_shorthand_resolves_root_from_linked_worktree() {
@@ -134,7 +140,7 @@ test_zsh_wrapper_dot_from_deleted_worktree_resolves_root_without_getcwd_noise() 
 }
 
 run_test 'dot shorthand resolves repo root' test_dot_root_shorthand_resolves_repo_root
-run_test 'dash legacy root alias still resolves repo root' test_dash_legacy_root_alias_still_resolves_repo_root
+run_test 'dash is not a root alias' test_dash_is_not_a_root_alias
 run_test 'dot shorthand resolves root from linked worktree' test_dot_root_shorthand_resolves_root_from_linked_worktree
 run_test 'zsh wrapper dot resolves root from deleted worktree without getcwd noise' test_zsh_wrapper_dot_from_deleted_worktree_resolves_root_without_getcwd_noise
 

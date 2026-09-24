@@ -13,7 +13,6 @@ worktrees and local branches when fzf is unavailable.
 Arguments:
   <branch>                  Switch to the branch's worktree, creating it if needed.
   .                         Switch to the repo root that owns .worktrees.
-  -                         Legacy alias for .
 
 Options:
   -b, --branch <branch>      Create a branch from the root HEAD and switch to it.
@@ -709,7 +708,7 @@ resolve_path() {
 
   cd "$root"
 
-  if [ "$target" = "." ] || [ "$target" = "-" ]; then
+  if [ "$target" = "." ]; then
     printf '%s\n' "$root"
     return 0
   fi
