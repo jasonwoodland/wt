@@ -98,14 +98,11 @@ worktree_branch_rows() {
   [ "${1:-}" != --include-detached ] || include_detached=1
   git worktree list --porcelain 2>/dev/null |
     awk -v include_detached="$include_detached" '
-      function short_sha(value) {
-        return substr(value, 1, 7)
-      }
       function flush() {
         if (path != "" && branch != "") {
-          print branch "\t" path "\t" short_sha(head)
+          print branch "\t" path "\t" head
         } else if (path != "" && detached && include_detached) {
-          print path "\t" path "\t" short_sha(head) "\tdetached"
+          print path "\t" path "\t" head "\tdetached"
         }
         detached = 0
         path = ""
@@ -630,7 +627,7 @@ clean_worktrees() {
 }
 
 list_candidates() {
-  local root root_branch_name root_sha branch path sha sort_value state
+  local root root_branch_name root_sha branch path sha sort_value state clean merged
   local -a branch_sort_values
 
   root=$(find_worktrees_root) || {
@@ -644,9 +641,13 @@ list_candidates() {
   root_sha=$(git rev-parse --short=7 HEAD 2>/dev/null || true)
 
   if [ -n "$root_branch_name" ]; then
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$root_branch_name" "$root" root root 0 "$root_sha"
+    clean=0
+    worktree_is_clean "$root" && clean=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$root_branch_name" "$root" root root 0 "$root_sha" "$clean" 1
   elif [ -n "$root_sha" ]; then
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$root" "$root" root detached 0 "$root_sha"
+    clean=0
+    worktree_is_clean "$root" && clean=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$root" "$root" root detached 0 "$root_sha" "$clean" 1
   fi
 
   while IFS= read -r sort_value; do
@@ -660,7 +661,7 @@ list_candidates() {
     BEGIN { OFS = "\t"; if (root_branch != "") seen["b:" root_branch] = 1 }
     function emit_worktree(key) {
       if (!(key in seen) && key in paths) {
-        print names[key], paths[key], "worktree", labels[key], 0, shas[key]
+        print names[key], paths[key], "worktree", labels[key], 0, shas[key], cleans[key], mergeds[key]
         seen[key] = 1
       }
     }
@@ -670,7 +671,8 @@ list_candidates() {
       if ($4 == "detached") detached[++detached_count] = key
       if (!(key in paths)) {
         worktrees[++worktree_count] = key
-        names[key] = $1; paths[key] = $2; shas[key] = $3
+        names[key] = $1; paths[key] = $2; shas[key] = substr($3, 1, 7)
+        cleans[key] = $5; mergeds[key] = $6
         labels[key] = ($4 == "detached" ? "detached" : "worktree")
       }
       next
@@ -689,7 +691,7 @@ list_candidates() {
       for (i = 1; i <= branch_count; i++) {
         key = "b:" branches[i]
         if (!(key in seen)) {
-          print branches[i], "", "branch", "branch", 1, branch_shas[i]
+          print branches[i], "", "branch", "branch", 1, branch_shas[i], "", ""
           seen[key] = 1
         }
       }
@@ -699,7 +701,11 @@ list_candidates() {
       # Git supplied these registered paths. Ignore missing worktrees without
       # launching another Git process for each one. Resolution still validates.
       [ -d "$path" ] && [ -e "$path/.git" ] || continue
-      printf '%s\t%s\t%s\t%s\n' "$branch" "$path" "$sha" "$state"
+      clean=0
+      worktree_is_clean "$path" && clean=1
+      merged=0
+      git merge-base --is-ancestor "$sha" HEAD 2>/dev/null && merged=1
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$branch" "$path" "$sha" "$state" "$clean" "$merged"
     done < <(worktree_branch_rows --include-detached)
   ) <(branch_ref_rows "${branch_sort_values[@]}")
 }
@@ -790,15 +796,19 @@ format_rows() {
         sha_label[i] = f[6]
         targets[i] = f[1]
         branch_label[i] = (f[4] == "detached" ? "(detached)" : f[1])
+        clean_label[i] = (f[7] == "1" ? "[clean]" : "")
+        merged_label[i] = (f[8] == "1" ? "[merged]" : "")
         if (length(sha_label[i]) > sha_width) sha_width = length(sha_label[i])
         if (length(branch_label[i]) > branch_width) branch_width = length(branch_label[i])
+        if (length(clean_label[i]) > clean_width) clean_width = length(clean_label[i])
+        if (length(merged_label[i]) > merged_width) merged_width = length(merged_label[i])
       }
       for (i = 1; i <= NR; i++) {
         if (with_target) printf "%s\t", targets[i]
         if (shown_path[i] == "") {
-          printf "%-" sha_width "s %s\n", sha_label[i], branch_label[i]
+          printf "%-" sha_width "s %-" branch_width "s %-" clean_width "s %-" merged_width "s\n", sha_label[i], branch_label[i], clean_label[i], merged_label[i]
         } else {
-          printf "%-" sha_width "s %-" branch_width "s %s\n", sha_label[i], branch_label[i], shown_path[i]
+          printf "%-" sha_width "s %-" branch_width "s %-" clean_width "s %-" merged_width "s %s\n", sha_label[i], branch_label[i], clean_label[i], merged_label[i], shown_path[i]
         }
       }
     }
@@ -831,7 +841,7 @@ print_zsh_completion() {
 _wt() {
   local -a values labels option_values option_labels
   local -a active_values active_labels normal_values normal_labels
-  local line branch worktree_path kind label sort sha formatted_label display_path root_path cur wt_rows branch_label
+  local line branch worktree_path kind label sort sha clean_status merged_status clean_label merged_label formatted_label display_path root_path cur wt_rows branch_label
   local REPLY
   local -a fields filtered_values filtered_labels
   local branch_width sha_width max_branch_width=0 max_sha_width=0 i
@@ -957,17 +967,23 @@ _wt() {
     label="$fields[4]"
     sort="$fields[5]"
     sha="$fields[6]"
+    clean_status="$fields[7]"
+    merged_status="$fields[8]"
     [[ -n "$branch" ]] || continue
 
     _wt_display_path "$worktree_path" "$root_path"
     display_path="$REPLY"
     branch_label="$branch"
     [[ "$fields[4]" != detached ]] || branch_label="(detached)"
+    clean_label=""
+    merged_label=""
+    [[ "$clean_status" != 1 ]] || clean_label="[clean]"
+    [[ "$merged_status" != 1 ]] || merged_label="[merged]"
 
     if [[ -z "$display_path" ]]; then
-      printf -v formatted_label "%-${max_sha_width}s %s" "$sha" "$branch_label"
+      printf -v formatted_label "%-${max_sha_width}s %-${max_branch_width}s %-7s %-8s" "$sha" "$branch_label" "$clean_label" "$merged_label"
     else
-      printf -v formatted_label "%-${max_sha_width}s %-${max_branch_width}s %s" "$sha" "$branch_label" "$display_path"
+      printf -v formatted_label "%-${max_sha_width}s %-${max_branch_width}s %-7s %-8s %s" "$sha" "$branch_label" "$clean_label" "$merged_label" "$display_path"
     fi
 
     if [[ "$sort" == 0 ]]; then

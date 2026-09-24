@@ -317,8 +317,12 @@ local function parse_rows(output)
 	end
 
 	for line in output:gmatch("[^\n]+") do
-		local branch, path, kind, label, sort, sha =
-		    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+		local branch, path, kind, label, sort, sha, clean, merged =
+		    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+		if not branch then
+			branch, path, kind, label, sort, sha =
+			    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+		end
 		if branch and branch ~= "" then
 			if label == "-" then
 				label = ""
@@ -332,6 +336,8 @@ local function parse_rows(output)
 				kind = kind,
 				label = label,
 				sha = sha,
+				clean = clean == "1",
+				merged = merged == "1",
 				sort = tonumber(sort) or 1,
 			})
 		end
@@ -960,6 +966,8 @@ function M.pick(opts)
 
 	local max_sha_width = 0
 	local max_branch_width = 0
+	local max_clean_width = #"[clean]"
+	local max_merged_width = #"[merged]"
 	for _, candidate in ipairs(candidates) do
 		max_sha_width = math.max(max_sha_width, #candidate.sha)
 		max_branch_width = math.max(max_branch_width, #(candidate.branch_display or candidate.branch))
@@ -970,6 +978,8 @@ function M.pick(opts)
 		items = {
 			{ width = max_sha_width },
 			{ width = max_branch_width },
+			{ width = max_clean_width },
+			{ width = max_merged_width },
 			{ remaining = true },
 		},
 	})
@@ -1016,10 +1026,13 @@ function M.pick(opts)
 						    return displayer({
 							    { entry.sha,          "Identifier" },
 							    branch_display,
+							    entry.clean and { "[clean]", "DiagnosticOk" } or "",
+							    entry.merged and { "[merged]", "DiagnosticOk" } or "",
 							    { entry.display_path, "diffFile" },
 						    })
 					    end,
-					    ordinal = entry.sha .. " " .. entry.branch .. " " .. entry.display_path,
+					    ordinal = entry.sha .. " " .. entry.branch .. " " .. entry.display_path
+					        .. (entry.clean and " clean" or "") .. (entry.merged and " merged" or ""),
 				    }
 			    end,
 		    }),
