@@ -3,7 +3,7 @@ set -eo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: wt [options] [<branch> | <path>]
+Usage: wt [options] [<branch> | <substring> | <path>]
        wt .
        wt -M [<oldbranch>] <newbranch>
 
@@ -12,6 +12,7 @@ worktrees and local branches when fzf is unavailable.
 
 Arguments:
   <branch>                  Switch to the branch's worktree, creating it if needed.
+  <substring>               Match an existing worktree branch or directory name.
   <path>                    Switch to a registered worktree by absolute path.
   .                         Switch to the repo root that owns .worktrees.
 
@@ -29,11 +30,16 @@ Options:
                             <old> defaults to the current branch.
       --zsh-completion      Print the zsh completion definition.
 
+Exact branches take priority. Otherwise, a literal, case-sensitive substring
+must match exactly one existing worktree; multiple matches are listed as an error.
+
 Cleanup never removes dirty worktrees, even with --force. The short cleanup
 options -c, -f, and -m can be combined.
 
 Examples:
   wt feature/login          Switch to an existing branch's worktree.
+  wt 123                    Switch to the worktree matching issue number 123.
+  wt login                  Switch to the worktree matching login.
   wt -b feature/search      Create a branch and switch to its worktree.
   wt -M feature/find        Rename the current branch and move its worktree.
   wt -cm                    Remove clean worktrees merged into the root HEAD.
@@ -712,7 +718,8 @@ list_candidates() {
 
 resolve_path() {
   local target="${1:-}"
-  local root worktree_dir worktree_parent path
+  local root worktree_dir worktree_parent path branch name head kind
+  local -a matched_paths matched_labels
 
   if [ -z "$target" ]; then
     echo "Usage: wt __path <target>" >&2
@@ -762,7 +769,29 @@ resolve_path() {
     return 0
   fi
 
-  echo "Branch '$target' does not exist" >&2
+  # Only fall back to existing worktrees after exact branch resolution.
+  # Quote the target so glob characters are treated literally.
+  while IFS=$'\t' read -r branch path head kind; do
+    name="${path##*/}"
+    [ "$kind" != detached ] || branch="$name"
+    if [[ "$branch" == *"$target"* || "$name" == *"$target"* ]]; then
+      is_existing_worktree_path "$path" || continue
+      matched_paths+=("$path")
+      matched_labels+=("$branch ($path)")
+    fi
+  done < <(worktree_branch_rows --include-detached)
+
+  if [ "${#matched_paths[@]}" -eq 1 ]; then
+    printf '%s\n' "${matched_paths[0]}"
+    return 0
+  fi
+  if [ "${#matched_paths[@]}" -gt 1 ]; then
+    echo "Multiple worktrees match '$target'; use a full branch name or path:" >&2
+    printf '  %s\n' "${matched_labels[@]}" >&2
+    return 1
+  fi
+
+  echo "Branch '$target' does not exist and no worktree matches it." >&2
   return 1
 }
 

@@ -5,7 +5,7 @@ Shell utility and [telescope.nvim](https://github.com/nvim-telescope/telescope.n
 ## Shell usage
 
 ```text
-Usage: wt [options] [<branch> | <path>]
+Usage: wt [options] [<branch> | <substring> | <path>]
        wt .
        wt -M [<oldbranch>] <newbranch>
 
@@ -14,6 +14,7 @@ worktrees and local branches when fzf is unavailable.
 
 Arguments:
   <branch>                  Switch to the branch's worktree, creating it if needed.
+  <substring>               Match an existing worktree branch or directory name.
   <path>                    Switch to a registered worktree by absolute path.
   .                         Switch to the repo root that owns .worktrees.
 
@@ -31,11 +32,16 @@ Options:
                             <old> defaults to the current branch.
       --zsh-completion      Print the zsh completion definition.
 
+Exact branches take priority. Otherwise, a literal, case-sensitive substring
+must match exactly one existing worktree; multiple matches are listed as an error.
+
 Cleanup never removes dirty worktrees, even with --force. The short cleanup
 options -c, -f, and -m can be combined.
 
 Examples:
   wt feature/login          Switch to an existing branch's worktree.
+  wt 123                    Switch to the worktree matching issue number 123.
+  wt login                  Switch to the worktree matching login.
   wt -b feature/search      Create a branch and switch to its worktree.
   wt -M feature/find        Rename the current branch and move its worktree.
   wt -cm                    Remove clean worktrees merged into the root HEAD.
@@ -45,6 +51,8 @@ Examples:
 The zsh function changes the current shell directory. When called directly,
 the executable prints the destination path for navigation commands.
 ```
+
+If the argument is not an exact local branch, `wt` searches existing worktree branch names and directory names for that literal, case-sensitive substring. For example, `wt 123` can switch to `feature/123-login`, and `wt login` works too. A single match switches directly; multiple matches are listed as an error so you can choose a full branch name or path. Exact branches take priority, including branches whose worktrees need creating. Tab completion also supports fuzzy matching.
 
 ## Installation
 
