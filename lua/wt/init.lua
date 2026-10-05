@@ -355,6 +355,19 @@ local function parse_rows(output)
 	return rows
 end
 
+local function status_label(entry)
+	local labels = {}
+	if entry.clean then
+		table.insert(labels, "[clean]")
+	end
+	if entry.kind == "root" then
+		table.insert(labels, "[root]")
+	elseif entry.merged then
+		table.insert(labels, "[merged]")
+	end
+	return table.concat(labels, " ")
+end
+
 local function get_candidates()
 	local wt, wt_err = wt_executable()
 	if not wt then
@@ -966,11 +979,11 @@ function M.pick(opts)
 
 	local max_sha_width = 0
 	local max_branch_width = 0
-	local max_clean_width = #"[clean]"
-	local max_merged_width = #"[merged]"
+	local max_status_width = 0
 	for _, candidate in ipairs(candidates) do
 		max_sha_width = math.max(max_sha_width, #candidate.sha)
 		max_branch_width = math.max(max_branch_width, #(candidate.branch_display or candidate.branch))
+		max_status_width = math.max(max_status_width, #status_label(candidate))
 	end
 
 	local displayer = entry_display.create({
@@ -978,8 +991,7 @@ function M.pick(opts)
 		items = {
 			{ width = max_sha_width },
 			{ width = max_branch_width },
-			{ width = max_clean_width },
-			{ width = max_merged_width },
+			{ width = max_status_width },
 			{ remaining = true },
 		},
 	})
@@ -1023,16 +1035,21 @@ function M.pick(opts)
 					    display_path = entry.display_path,
 					    display = function()
 						    local branch_display = entry.branch_display or entry.branch
+						    local status_display = status_label(entry)
+						    if status_display ~= "" then
+							    local status_group = (entry.clean or entry.merged) and "DiagnosticOk" or "DiagnosticInfo"
+							    status_display = { status_display, status_group }
+						    end
 						    return displayer({
 							    { entry.sha,          "Identifier" },
 							    branch_display,
-							    entry.clean and { "[clean]", "DiagnosticOk" } or "",
-							    entry.merged and { "[merged]", "DiagnosticOk" } or "",
+							    status_display,
 							    { entry.display_path, "diffFile" },
-						    })
-					    end,
-					    ordinal = entry.sha .. " " .. entry.branch .. " " .. entry.display_path
-					        .. (entry.clean and " clean" or "") .. (entry.merged and " merged" or ""),
+					    })
+				    end,
+				    ordinal = entry.sha .. " " .. entry.branch .. " " .. entry.display_path
+				        .. (entry.clean and " clean" or "")
+				        .. (entry.kind == "root" and " root" or (entry.merged and " merged" or "")),
 				    }
 			    end,
 		    }),

@@ -67,9 +67,9 @@ autoload -Uz wt
 
 ## Telescope picker
 
-The Telescope, fzf, and zsh completion pickers list existing worktrees and local branches as `{sha}  {branch name}  [clean]  [merged]  {relative worktree path}`. `[clean]` means the worktree has no tracked or untracked changes; `[merged]` means its `HEAD` is an ancestor of the root worktree's `HEAD`. Status columns are blank for branch-only rows. The path is shown only for existing worktrees, including worktrees outside `.worktrees`; branch-only rows omit the path. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
+The Telescope, fzf, and zsh completion pickers list existing worktrees and local branches as `{sha}  {branch name}  [clean] [merged]  {relative worktree path}`. `[clean]` means the worktree has no tracked or untracked changes; `[merged]` means a linked worktree's `HEAD` is an ancestor of the root worktree's `HEAD`. The root worktree shows `[root]` in the same status column. Status columns are blank for branch-only rows. The path is shown only for existing worktrees, including worktrees outside `.worktrees`; branch-only rows omit the path. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
 
-Detached worktrees appear as `{sha}  (detached)  [clean]  [merged]  {relative worktree path}` in both pickers and shell completion. Selecting one opens its existing directory without creating or attaching a branch. Completion inserts its absolute path; you can also use `wt /absolute/path/to/worktree` directly. With `branch.sort` configured, detached worktrees follow branch-attached worktrees and precede branch-only rows.
+Detached worktrees appear as `{sha}  (detached)  [clean] [merged]  {relative worktree path}` in both pickers and shell completion. Selecting one opens its existing directory without creating or attaching a branch. Completion inserts its absolute path; you can also use `wt /absolute/path/to/worktree` directly. With `branch.sort` configured, detached worktrees follow branch-attached worktrees and precede branch-only rows.
 
 ```lua
 require("wt").setup({ key = "<Space>w" })
