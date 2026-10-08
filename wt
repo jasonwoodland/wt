@@ -18,13 +18,15 @@ Arguments:
 
 Options:
   -b, --branch <branch>      Create a branch from the root HEAD and switch to it.
-  -c, --clean                Remove clean non-main worktrees after confirmation.
+  -c, --clean [<target>]     Remove clean non-main worktrees after confirmation.
+                            Optionally select one by branch, substring, or path.
   -d, --delete <branch>      Remove the clean worktree, then delete the branch
                             if Git considers it fully merged.
   -f, --force                With --clean, skip confirmation.
   -h, --help                 Show this help.
   -l, --latest               Switch to the latest local branch by committer date.
   -m, --merged [<rev>]       With --clean, only remove worktrees merged into <rev>.
+                            Requires commits since creation by wt.
                             Defaults to the root worktree HEAD.
   -M, --move [<old>] <new>    Rename a branch and move its worktree, if one exists.
                             <old> defaults to the current branch.
@@ -43,6 +45,9 @@ Examples:
   wt -b feature/search      Create a branch and switch to its worktree.
   wt -M feature/find        Rename the current branch and move its worktree.
   wt -cm                    Remove clean worktrees merged into the root HEAD.
+  wt -cf 320                Remove the clean worktree matching 320.
+  wt -cm main 320           Remove matching worktree if merged into main.
+  wt -cm -- 320             Use root HEAD as the merge reference for matching 320.
   wt -cfm                   Do the same without confirmation.
   wt -c --merged main       Remove clean worktrees merged into main.
 
@@ -413,7 +418,9 @@ worktree_is_clean() {
 
 clean_usage() {
   cat >&2 <<'EOF'
-Usage: wt [--clean | -c] [--force | -f] [--merged | -m [<rev>]]
+Usage: wt [--clean | -c] [--force | -f] [--merged | -m [<rev>]] [<target>]
+       wt -cm [<rev>] [<target>]
+       wt -cm -- <target>
 EOF
 }
 
@@ -454,6 +461,18 @@ worktree_is_merged_to() {
   git merge-base --is-ancestor "$candidate_head" "$target_commit" 2>/dev/null
 }
 
+worktree_has_commits_since_creation() {
+  local path="$1" git_dir start_commit candidate_head
+
+  git_dir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  [ -f "$git_dir/wt-start-commit" ] || return 1
+  IFS= read -r start_commit < "$git_dir/wt-start-commit" || return 1
+  git -C "$path" cat-file -e "${start_commit}^{commit}" 2>/dev/null || return 1
+  candidate_head=$(git -C "$path" rev-parse --verify -q 'HEAD^{commit}') || return 1
+  # Count commits absent from the initial HEAD, including after a rebase.
+  [ -n "$(git -C "$path" rev-list --max-count=1 "$start_commit..$candidate_head" 2>/dev/null)" ]
+}
+
 print_clean_skips() {
   if [ "${#dirty_displays[@]}" -gt 0 ]; then
     echo "Skipped unclean worktrees:"
@@ -463,17 +482,29 @@ print_clean_skips() {
     echo "Skipped clean unmerged worktrees:"
     printf '  %s\n' "${unmerged_displays[@]}"
   fi
+  if [ "${#no_commits_displays[@]}" -gt 0 ]; then
+    echo "Skipped clean worktrees with no recorded commits since creation:"
+    printf '  %s\n' "${no_commits_displays[@]}"
+  fi
 }
 
 clean_worktrees() {
   local root no_confirm=0 clean_requested=0 merged_only=0 merged_rev="" merged_target merged_target_commit
-  local arg flags ch reply path branch sha display failed=0 i
-  local -a clean_paths clean_displays dirty_displays unmerged_displays failed_displays removed_displays
+  local arg flags ch reply path branch sha display failed=0 i cleanup_target="" selected_path=""
+  local -a clean_paths clean_displays dirty_displays unmerged_displays no_commits_displays failed_displays removed_displays
 
   while [ "$#" -gt 0 ]; do
     arg="$1"
     shift
     case "$arg" in
+      --)
+        if [ "$#" -ne 1 ] || [ -n "$cleanup_target" ] || [ -z "${1:-}" ]; then
+          clean_usage
+          return 2
+        fi
+        cleanup_target="$1"
+        shift
+        ;;
       --clean)
         clean_requested=1
         ;;
@@ -523,18 +554,17 @@ clean_worktrees() {
             m) merged_only=1 ;;
           esac
         done
-        if [ "$arg" = "-m" ] && [ "$#" -gt 0 ] && is_merged_rev_token "${1:-}"; then
-          if [ -n "$merged_rev" ]; then
-            clean_usage
-            return 2
-          fi
+        if [[ "$flags" == *m* ]] && [ -z "$merged_rev" ] && [ "$#" -gt 0 ] && is_merged_rev_token "${1:-}"; then
           merged_rev="$1"
           shift
         fi
         ;;
       *)
-        clean_usage
-        return 2
+        if [ -n "$cleanup_target" ] || [ -z "$arg" ]; then
+          clean_usage
+          return 2
+        fi
+        cleanup_target="$arg"
         ;;
     esac
   done
@@ -560,9 +590,18 @@ clean_worktrees() {
     fi
   fi
 
+  if [ -n "$cleanup_target" ]; then
+    selected_path=$(resolve_path "$cleanup_target" existing) || return $?
+    if [ "$selected_path" = "$root" ]; then
+      echo "Cannot clean root worktree." >&2
+      return 1
+    fi
+  fi
+
   while IFS=$'\t' read -r path branch sha; do
     [ -n "$path" ] || continue
     [ "$path" != "$root" ] || continue
+    [ -z "$selected_path" ] || [ "$path" = "$selected_path" ] || continue
     is_existing_worktree_path "$path" || continue
     display=$(relative_path_for_root "$path" "$root")
     if ! worktree_is_clean "$path"; then
@@ -571,6 +610,10 @@ clean_worktrees() {
     fi
     if [ "$merged_only" = 1 ] && ! worktree_is_merged_to "$path" "$merged_target_commit"; then
       unmerged_displays+=("$display")
+      continue
+    fi
+    if [ "$merged_only" = 1 ] && ! worktree_has_commits_since_creation "$path"; then
+      no_commits_displays+=("$display")
       continue
     fi
     clean_paths+=("$path")
@@ -718,7 +761,8 @@ list_candidates() {
 
 resolve_path() {
   local target="${1:-}"
-  local root worktree_dir worktree_parent path branch name head kind
+  local existing_only="${2:-}"
+  local root worktree_dir worktree_parent path branch name head kind git_dir
   local -a matched_paths matched_labels
 
   if [ -z "$target" ]; then
@@ -761,10 +805,16 @@ resolve_path() {
   fi
 
   if git show-ref --verify --quiet "refs/heads/$target"; then
+    if [ "$existing_only" = existing ]; then
+      echo "No worktree found for branch '$target'." >&2
+      return 1
+    fi
     echo "Creating worktree for branch '$target'..." >&2
     worktree_parent=$(dirname "$worktree_dir")
     mkdir -p "$worktree_parent"
-    git worktree add "$worktree_dir" "$target" >&2
+    git worktree add "$worktree_dir" "$target" >&2 || return $?
+    git_dir=$(git -C "$worktree_dir" rev-parse --absolute-git-dir) || return $?
+    git -C "$worktree_dir" rev-parse --verify 'HEAD^{commit}' > "$git_dir/wt-start-commit" || return $?
     printf '%s\n' "$worktree_dir"
     return 0
   fi
@@ -825,9 +875,9 @@ format_rows() {
         sha_label[i] = f[6]
         targets[i] = f[1]
         branch_label[i] = (f[4] == "detached" ? "(detached)" : f[1])
-        status_label[i] = (f[7] == "1" ? "[clean]" : "")
+        status_label[i] = (f[7] == "0" ? "[dirty]" : "")
         if (f[3] == "root") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") "[root]"
-        else if (f[8] == "1") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") "[merged]"
+        else if (f[8] == "0") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") "[unmerged]"
         if (length(sha_label[i]) > sha_width) sha_width = length(sha_label[i])
         if (length(branch_label[i]) > branch_width) branch_width = length(branch_label[i])
         if (length(status_label[i]) > status_width) status_width = length(status_label[i])
@@ -1005,11 +1055,11 @@ _wt() {
     branch_label="$branch"
     [[ "$fields[4]" != detached ]] || branch_label="(detached)"
     status_label=""
-    [[ "$clean_status" != 1 ]] || status_label="[clean]"
+    [[ "$clean_status" != 0 ]] || status_label="[dirty]"
     if [[ "$kind" == root ]]; then
       status_label="${status_label:+$status_label }[root]"
-    elif [[ "$merged_status" == 1 ]]; then
-      status_label="${status_label:+$status_label }[merged]"
+    elif [[ "$merged_status" == 0 ]]; then
+      status_label="${status_label:+$status_label }[unmerged]"
     fi
 
     if [[ -z "$display_path" ]]; then

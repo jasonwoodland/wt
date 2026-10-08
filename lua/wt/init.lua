@@ -357,13 +357,13 @@ end
 
 local function status_label(entry)
 	local labels = {}
-	if entry.clean then
-		table.insert(labels, "[clean]")
+	if entry.kind ~= "branch" and not entry.clean then
+		table.insert(labels, "[dirty]")
 	end
 	if entry.kind == "root" then
 		table.insert(labels, "[root]")
-	elseif entry.merged then
-		table.insert(labels, "[merged]")
+	elseif entry.kind ~= "branch" and not entry.merged then
+		table.insert(labels, "[unmerged]")
 	end
 	return table.concat(labels, " ")
 end
@@ -1037,7 +1037,7 @@ function M.pick(opts)
 						    local branch_display = entry.branch_display or entry.branch
 						    local status_display = status_label(entry)
 						    if status_display ~= "" then
-							    local status_group = (entry.clean or entry.merged) and "DiagnosticOk" or "DiagnosticInfo"
+							    local status_group = (not entry.clean or (entry.kind ~= "root" and not entry.merged)) and "DiagnosticWarn" or "DiagnosticInfo"
 							    status_display = { status_display, status_group }
 						    end
 						    return displayer({
@@ -1048,8 +1048,7 @@ function M.pick(opts)
 					    })
 				    end,
 				    ordinal = entry.sha .. " " .. entry.branch .. " " .. entry.display_path
-				        .. (entry.clean and " clean" or "")
-				        .. (entry.kind == "root" and " root" or (entry.merged and " merged" or "")),
+				        .. " " .. status_label(entry),
 				    }
 			    end,
 		    }),
