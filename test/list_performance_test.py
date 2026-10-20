@@ -60,7 +60,11 @@ with tempfile.TemporaryDirectory(prefix="wt-list-perf-") as temp:
     assert by_branch["1"][1:3] == [str(external), "worktree"]
     assert by_branch["stale"][1:3] == ["", "branch"]
     assert [row[0] for row in rows[3:] if row[2] == "branch"] == sorted(set(branches) - {"01", "1"}, reverse=True)
-    assert len(trace.read_text().splitlines()) <= 6, "Git calls must not scale with worktrees"
+    calls = trace.read_text().splitlines()
+    assert len(calls) <= 8, "Only snapshots and one status check per existing worktree are needed here"
+    assert sum(call.startswith("for-each-ref ") for call in calls) == 1
+    assert not any(call.startswith("merge-base ") for call in calls), "Identical tips need no ancestry checks"
+    assert not any(call.startswith("branch --show-current") or call.startswith("rev-parse ") for call in calls)
 
     for path in detached_paths:
         assert by_branch[str(path)][1:5] == [str(path), "worktree", "detached", "0"]
@@ -87,12 +91,22 @@ _wt
     width = max(len("(detached)" if row[3] == "detached" else row[0]) for row in rows)
     sha_width = max(len(row[5]) for row in rows)
     expected = []
-    for branch, path, _, state, _, short_sha in rows:
+    for branch, path, kind, state, _, short_sha, clean, merged, tracking in rows:
         shown_branch = "(detached)" if state == "detached" else branch
         relative = os.path.relpath(path, repo) if path else ""
-        label = f"{short_sha:<{sha_width}} {shown_branch}"
+        statuses = []
+        if clean == "0":
+            statuses.append("[dirty]")
+        if kind == "root":
+            statuses.append("[root]")
+        elif merged == "0":
+            statuses.append("[unmerged]")
+        if tracking:
+            statuses.append(tracking)
+        status = " ".join(statuses)
+        label = f"{short_sha:<{sha_width}} {shown_branch:<{width}} {status:<16}"
         if relative:
-            label = f"{short_sha:<{sha_width}} {shown_branch:<{width}} {relative}"
+            label += f" {relative}"
         expected.append(f"{branch}\t{label}")
     assert completed.splitlines() == expected
 

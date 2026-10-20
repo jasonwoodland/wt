@@ -317,8 +317,12 @@ local function parse_rows(output)
 	end
 
 	for line in output:gmatch("[^\n]+") do
-		local branch, path, kind, label, sort, sha, clean, merged =
-		    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+		local branch, path, kind, label, sort, sha, clean, merged, tracking =
+		    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+		if not branch then
+			branch, path, kind, label, sort, sha, clean, merged =
+			    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+		end
 		if not branch then
 			branch, path, kind, label, sort, sha =
 			    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
@@ -338,6 +342,7 @@ local function parse_rows(output)
 				sha = sha,
 				clean = clean == "1",
 				merged = merged == "1",
+				tracking = tracking or "",
 				sort = tonumber(sort) or 1,
 			})
 		end
@@ -364,6 +369,9 @@ local function status_label(entry)
 		table.insert(labels, "[root]")
 	elseif entry.kind ~= "branch" and not entry.merged then
 		table.insert(labels, "[unmerged]")
+	end
+	if entry.tracking and entry.tracking ~= "" then
+		table.insert(labels, entry.tracking)
 	end
 	return table.concat(labels, " ")
 end
@@ -1037,7 +1045,10 @@ function M.pick(opts)
 						    local branch_display = entry.branch_display or entry.branch
 						    local status_display = status_label(entry)
 						    if status_display ~= "" then
-							    local status_group = (not entry.clean or (entry.kind ~= "root" and not entry.merged)) and "DiagnosticWarn" or "DiagnosticInfo"
+							    local needs_attention = (entry.kind ~= "branch" and not entry.clean)
+							        or (entry.kind == "worktree" and not entry.merged)
+							        or (entry.tracking and entry.tracking ~= "")
+							    local status_group = needs_attention and "DiagnosticWarn" or "DiagnosticInfo"
 							    status_display = { status_display, status_group }
 						    end
 						    return displayer({
