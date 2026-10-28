@@ -74,7 +74,8 @@ with tempfile.TemporaryDirectory(prefix="wt-upstream-") as temporary:
     env.update(PATH=f"{bin_dir}:{ROOT}:{env['PATH']}", WT_CAPTURE=str(capture), WT_TRACE=str(trace))
     rows = subprocess.check_output([str(ROOT / "wt"), "__list"], cwd=repo, env=env, text=True)
     calls = trace.read_text().splitlines()
-    assert sum(call.startswith("for-each-ref ") for call in calls) == 1, calls
+    assert sum(call.startswith("for-each-ref ") for call in calls) == 2, calls
+    assert sum(call.startswith("for-each-ref --merged=") for call in calls) == 1, calls
     assert sum(call.startswith(f"-C {repo} status ") for call in calls) == 1, calls
     by_branch = {row[0]: row for row in (line.split("\t") for line in rows.splitlines())}
     for branch, status in expected.items():

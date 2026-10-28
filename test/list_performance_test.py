@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Check listing scale without flaky wall-clock limits, plus completion labels."""
 import os
+import json
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -61,8 +63,9 @@ with tempfile.TemporaryDirectory(prefix="wt-list-perf-") as temp:
     assert by_branch["stale"][1:3] == ["", "branch"]
     assert [row[0] for row in rows[3:] if row[2] == "branch"] == sorted(set(branches) - {"01", "1"}, reverse=True)
     calls = trace.read_text().splitlines()
-    assert len(calls) <= 8, "Only snapshots and one status check per existing worktree are needed here"
-    assert sum(call.startswith("for-each-ref ") for call in calls) == 1
+    assert len(calls) <= 9, "Only snapshots, batched ancestry, and one status check per existing worktree are needed here"
+    assert sum(call.startswith("for-each-ref ") for call in calls) == 2
+    assert sum(call.startswith("for-each-ref --merged=") for call in calls) == 1
     assert not any(call.startswith("merge-base ") for call in calls), "Identical tips need no ancestry checks"
     assert not any(call.startswith("branch --show-current") or call.startswith("rev-parse ") for call in calls)
 
@@ -131,5 +134,72 @@ _wt
                                             cwd=repo, env=env, text=True).splitlines()
     assert detached_rows[0].split("\t")[:5] == [str(repo), str(repo), "root", "detached", "0"]
     assert sum(row.split("\t")[1] == str(repo) for row in detached_rows) == 1
+
+    # Different tips must still use a single branch ancestry query. Include
+    # detached tips and an untracked directory.
+    tree = git("rev-parse", "HEAD^{tree}").decode().strip()
+    child = git("commit-tree", tree, "-p", sha, input=b"child\n").decode().strip()
+    ahead = git("commit-tree", tree, "-p", child, input=b"ahead\n").decode().strip()
+    git("update-ref", "HEAD", child)
+    git("update-ref", "refs/heads/01", ahead)
+    subprocess.check_call([GIT, "-C", str(detached_paths[0]), "update-ref", "HEAD", ahead], env=env)
+    nested = external / "untracked" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "file").write_text("dirty\n")
+    trace.write_text("")
+    varied = subprocess.check_output([str(ROOT / "wt"), "__list"], cwd=repo, env=env, text=True)
+    varied_rows = {row[0]: row for row in (line.split("\t") for line in varied.splitlines())}
+    assert varied_rows["01"][7] == "0", "Ahead branch is unmerged"
+    assert varied_rows["1"][6:8] == ["0", "1"], "Ancestor branch is merged and untracked directory is dirty"
+    assert varied_rows[str(detached_paths[0])][7] == "0", "Ahead detached tip is unmerged"
+    assert varied_rows[str(detached_paths[1])][7] == "1", "Ancestor detached tip is merged"
+    calls = trace.read_text().splitlines()
+    assert sum(call.startswith("for-each-ref --merged=") for call in calls) == 1
+    assert sum(call.startswith("merge-base ") for call in calls) == len(detached_paths)
+
+    # Exercise more worktrees than the worker limit, with delayed status
+    # processes. Check the actual overlap and output order, not a time budget.
+    for i in range(12):
+        git("worktree", "add", "-q", "-b", f"parallel/{i}", str(repo / ".worktrees" / f"parallel-{i}"), sha)
+    expected = subprocess.check_output([str(ROOT / "wt"), "__list"], cwd=repo, env=env)
+    events = base / "status-events"
+    wrapper.write_text(f"#!{sys.executable}\n" + r'''
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import time
+
+args = sys.argv[1:]
+real_git = os.environ["WT_REAL_GIT"]
+if "status" not in args:
+    os.execv(real_git, [real_git, *args])
+
+def record(change):
+    with open(os.environ["WT_STATUS_EVENTS"], "a") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        stream.write(json.dumps(change) + "\n")
+        stream.flush()
+
+record(1)
+try:
+    time.sleep(0.1)
+    result = subprocess.call([real_git, *args])
+finally:
+    record(-1)
+sys.exit(result)
+''')
+    concurrent_env = dict(env, WT_REAL_GIT=GIT, WT_STATUS_EVENTS=str(events))
+    concurrent = subprocess.check_output([str(ROOT / "wt"), "__list"], cwd=repo, env=concurrent_env)
+    assert concurrent == expected, "Parallel checks must preserve every row and its ordering"
+    active = peak = starts = 0
+    for change in map(json.loads, events.read_text().splitlines()):
+        active += change
+        starts += change == 1
+        peak = max(peak, active)
+        assert 0 <= active <= 8, "At most eight status checks may run together"
+    assert active == 0 and starts == 17, "All existing worktrees must finish their checks"
+    assert peak > 1, "Status checks should overlap"
 
 print("listing scale, stale worktrees, numeric branches, and completion labels passed")

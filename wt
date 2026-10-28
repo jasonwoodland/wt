@@ -675,8 +675,31 @@ clean_worktrees() {
   return "$failed"
 }
 
+list_worktree_checks() {
+  local shard="$1" shards="$2" root_head="$3" merged_heads="$4" rows="$5"
+  local branch path sha state clean merged index=0
+  while IFS=$'\t' read -r branch path sha state; do
+    index=$((index + 1))
+    [ "$(((index - 1) % shards))" -eq "$shard" ] || continue
+    [ -d "$path" ] && [ -e "$path/.git" ] || continue
+    clean=0
+    # Only existence matters for the label: do not enumerate every file
+    # inside untracked directories. Cleanup keeps its separate full check.
+    [ -z "$(git -C "$path" status --porcelain --untracked-files=normal 2>/dev/null || true)" ] && clean=1
+    merged=0
+    if [ "$sha" = "$root_head" ]; then
+      merged=1
+    elif [ "$state" = detached ]; then
+      git merge-base --is-ancestor "$sha" "$root_head" 2>/dev/null && merged=1
+    elif [[ $'\n'"$merged_heads"$'\n' == *$'\n'"$sha"$'\n'* ]]; then
+      merged=1
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$index" "$branch" "$path" "$sha" "$state" "$clean" "$merged"
+  done <<< "$rows"
+}
+
 list_candidates() {
-  local root root_head branch path sha sort_value state clean merged
+  local root root_head sort_value worktree_rows merged_heads
   local -a branch_sort_values
 
   root=$(find_worktrees_root) || {
@@ -686,6 +709,11 @@ list_candidates() {
   root=$(cd "$root" && pwd -P)
 
   cd "$root"
+  worktree_rows=$(worktree_branch_rows --include-detached)
+  root_head=$(printf '%s\n' "$worktree_rows" | awk -F '\t' -v root="$root" '$2 == root { print $3; exit }')
+  # Git can classify all branch tips in one graph walk. Detached worktrees
+  # have no branch ref, so they retain the individual ancestry check below.
+  merged_heads=$(git for-each-ref --merged="$root_head" --format='%(objectname)' refs/heads/ 2>/dev/null || true)
   while IFS= read -r sort_value; do
     [ -n "$sort_value" ] || continue
     branch_sort_values+=("$sort_value")
@@ -743,22 +771,17 @@ list_candidates() {
       }
     }
   ' <(
-    while IFS=$'\t' read -r branch path sha state; do
-      # Git supplied these registered paths. Ignore missing worktrees without
-      # launching another Git process for each one. Resolution still validates.
-      [ -d "$path" ] && [ -e "$path/.git" ] || continue
-      clean=0
-      worktree_is_clean "$path" && clean=1
-      merged=0
-      if [ "$path" = "$root" ]; then
-        root_head="$sha"
-      elif [ "$sha" = "$root_head" ]; then
-        merged=1
-      else
-        git merge-base --is-ancestor "$sha" "$root_head" 2>/dev/null && merged=1
-      fi
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$branch" "$path" "$sha" "$state" "$clean" "$merged"
-    done < <(worktree_branch_rows --include-detached)
+    # Bound filesystem concurrency, then restore Git's original row order.
+    # Separate pipes keep rows intact even when paths are unusually long.
+    cat <(list_worktree_checks 0 8 "$root_head" "$merged_heads" "$worktree_rows") \
+        <(list_worktree_checks 1 8 "$root_head" "$merged_heads" "$worktree_rows") \
+        <(list_worktree_checks 2 8 "$root_head" "$merged_heads" "$worktree_rows") \
+        <(list_worktree_checks 3 8 "$root_head" "$merged_heads" "$worktree_rows") \
+        <(list_worktree_checks 4 8 "$root_head" "$merged_heads" "$worktree_rows") \
+        <(list_worktree_checks 5 8 "$root_head" "$merged_heads" "$worktree_rows") \
+        <(list_worktree_checks 6 8 "$root_head" "$merged_heads" "$worktree_rows") \
+        <(list_worktree_checks 7 8 "$root_head" "$merged_heads" "$worktree_rows") |
+      sort -n -k1,1 | cut -f2-
   ) <(branch_ref_rows "${branch_sort_values[@]}")
 }
 
