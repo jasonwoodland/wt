@@ -15,6 +15,7 @@ worktrees and local branches when fzf is unavailable.
 Arguments:
   <branch>                  Switch to the branch's worktree, creating it if needed.
   <substring>               Match an existing worktree branch or directory name.
+  <pr-number>               Switch to a PR's linked-issue worktree or local branch.
   <path>                    Switch to a registered worktree by absolute path.
   .                         Switch to the repo root that owns .worktrees.
 
@@ -68,7 +69,41 @@ PATH="$HOME/Developer/github.com/jasonwoodland/wt:$PATH"
 fpath+=("$HOME/Developer/github.com/jasonwoodland/wt/zsh/functions")
 fpath+=("$HOME/Developer/github.com/jasonwoodland/wt/zsh/completion")
 autoload -Uz wt
+source "$HOME/Developer/github.com/jasonwoodland/wt/zsh/init.zsh"
 ```
+
+### GitHub pull requests
+
+With `gh` installed and authenticated, listings show `[PR #456]` on the
+corresponding local branch or worktree. `wt 456` first resolves an exact local
+branch, then a cached PR alias, then the usual worktree substring match. When
+none matches, it looks up PR #456 on GitHub. A PR prefers an
+existing worktree whose branch or directory contains one of its linked issue
+numbers as a complete numeric token (`123` matches `feature/123-login`, but not
+`feature/1234-login`). Multiple matching worktrees are reported as ambiguous.
+Only linked issues in the PR's repository are considered. Without an issue
+worktree, the PR's exact local head branch is used, creating its worktree if
+needed. Fork PRs require a matching linked-issue worktree; a fork head name alone
+does not identify a local branch safely. Cleanup and deletion retain their local
+targeting rules.
+
+fzf and Telescope open immediately with local rows and the previous PR snapshot,
+then fetch open PRs once and refresh the picker. Plain listings and `wt __list`
+read the snapshot without contacting GitHub. Successful snapshots are stored in
+the shared Git directory, so linked worktrees share them; changing remotes or
+`GH_REPO`/`GH_HOST` invalidates the snapshot. Failed refreshes preserve the previous
+snapshot. PR lookup on a miss also supports closed and merged PRs. Each GitHub
+request has an eight-second limit, and ordinary local navigation works without
+`gh` or network access. Linked issues use GitHub's closing-issue relationships,
+not arbitrary issue mentions in the PR text.
+
+The `zsh/init.zsh` line above enables fetch-ahead: typing `wt` at the start of a
+prompt launches one background refresh for that command line. Tab waits only for
+any remaining fetch time, then builds the completion menu with PR labels; typing
+a PR number filters to its associated branches. Without the hook, completion
+fetches synchronously. There is no periodic daemon or refresh on every keystroke.
+After updating `wt`, source `zsh/init.zsh` again (or open a new shell) to reload
+any completion function that the current shell has already loaded.
 
 ## Telescope picker
 

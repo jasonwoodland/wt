@@ -93,7 +93,7 @@ _wt
     completed = subprocess.check_output(["zsh", "-f", "-c", script], cwd=repo, env=env, text=True)
     width = max(len("(detached)" if row[3] == "detached" else row[0]) for row in rows)
     sha_width = max(len(row[5]) for row in rows)
-    expected = []
+    formatted_rows = []
     for branch, path, kind, state, _, short_sha, clean, merged, tracking in rows:
         shown_branch = "(detached)" if state == "detached" else branch
         relative = os.path.relpath(path, repo) if path else ""
@@ -107,7 +107,11 @@ _wt
         if tracking:
             statuses.append(tracking)
         status = " ".join(statuses)
-        label = f"{short_sha:<{sha_width}} {shown_branch:<{width}} {status:<16}"
+        formatted_rows.append((branch, short_sha, shown_branch, status, relative))
+    status_width = max(len(row[3]) for row in formatted_rows)
+    expected = []
+    for branch, short_sha, shown_branch, status, relative in formatted_rows:
+        label = f"{short_sha:<{sha_width}} {shown_branch:<{width}} {status:<{status_width}}"
         if relative:
             label += f" {relative}"
         expected.append(f"{branch}\t{label}")
@@ -202,4 +206,30 @@ sys.exit(result)
     assert active == 0 and starts == 17, "All existing worktrees must finish their checks"
     assert peak > 1, "Status checks should overlap"
 
-print("listing scale, stale worktrees, numeric branches, and completion labels passed")
+    # Hundreds of cached PRs must add a fixed number of Git queries, with no
+    # network calls while listing. Keep upstream and PR fields independent.
+    wrapper.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$WT_TRACE"\n'
+                       f'exec {shlex.quote(GIT)} "$@"\n')
+    git("remote", "add", "origin", "https://github.com/example/performance.git")
+    trace.write_text("")
+    subprocess.check_output([str(ROOT / "wt"), "__list"], cwd=repo, env=env)
+    baseline_calls = len(trace.read_text().splitlines())
+    gh_trace = base / "gh-calls"
+    gh = bin_dir / "gh"
+    gh.write_text('#!/bin/sh\nprintf call >> "$WT_GH_TRACE"\n'
+                  + "cat <<'EOF'\n"
+                  + "".join(f"{10000+i}\t{branch}\tfalse\t\n" for i, branch in enumerate(branches))
+                  + "EOF\n")
+    gh.chmod(0o755)
+    cached_env = dict(env, WT_GH_TRACE=str(gh_trace))
+    subprocess.check_call([str(ROOT / "wt"), "__pr_refresh"], cwd=repo, env=cached_env)
+    trace.write_text("")
+    cached = subprocess.check_output([str(ROOT / "wt"), "__list"], cwd=repo, env=cached_env, text=True)
+    assert gh_trace.read_text() == "call", "Reading PR metadata must not refresh it"
+    assert len(trace.read_text().splitlines()) <= baseline_calls + 3, "PR joins must batch Git queries"
+    cached_rows = {fields[0]: fields for fields in (line.split("\t") for line in cached.splitlines())}
+    for i, branch in enumerate(branches):
+        assert cached_rows[branch][9] == f"[PR #{10000+i}]"
+        assert "PR #" not in cached_rows[branch][8]
+
+print("listing scale, cached PR scale, stale worktrees, numeric branches, and completion labels passed")

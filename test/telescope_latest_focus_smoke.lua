@@ -216,6 +216,9 @@ package.preload["telescope.pickers"] = function()
 
 					local picker = {
 						manager = manager,
+						get_selection = function() return telescope_state.selection end,
+						register_completion_callback = function() end,
+						refresh = function() end,
 						set_selection_count = 0,
 						last_row = nil,
 						get_row = function(_, index)

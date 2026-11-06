@@ -26,6 +26,7 @@ end
 
 package.preload["telescope.actions.state"] = function()
 	return {
+		get_current_picker = function() return nil end,
 		get_selected_entry = function()
 			return telescope_state.selection
 		end,

@@ -317,8 +317,12 @@ local function parse_rows(output)
 	end
 
 	for line in output:gmatch("[^\n]+") do
-		local branch, path, kind, label, sort, sha, clean, merged, tracking =
-		    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+		local branch, path, kind, label, sort, sha, clean, merged, tracking, prs =
+		    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+		if not branch then
+			branch, path, kind, label, sort, sha, clean, merged, tracking =
+			    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+		end
 		if not branch then
 			branch, path, kind, label, sort, sha, clean, merged =
 			    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
@@ -343,6 +347,7 @@ local function parse_rows(output)
 				clean = clean == "1",
 				merged = merged == "1",
 				tracking = tracking or "",
+				prs = prs or "",
 				sort = tonumber(sort) or 1,
 			})
 		end
@@ -372,6 +377,9 @@ local function status_label(entry)
 	end
 	if entry.tracking and entry.tracking ~= "" then
 		table.insert(labels, entry.tracking)
+	end
+	if entry.prs and entry.prs ~= "" then
+		table.insert(labels, entry.prs)
 	end
 	return table.concat(labels, " ")
 end
@@ -973,22 +981,11 @@ local function remove_worktree(entry)
 	return true
 end
 
-function M.pick(opts)
-	opts = opts or {}
-	local candidates, err = get_candidates()
-	if not candidates then
-		vim.notify(err ~= "" and err or "Could not list worktrees", vim.log.levels.ERROR)
-		return
-	end
-	if #candidates == 0 then
-		vim.notify("No worktrees or local branches found", vim.log.levels.INFO)
-		return
-	end
-
+local function candidate_finder(results)
 	local max_sha_width = 0
 	local max_branch_width = 0
 	local max_status_width = 0
-	for _, candidate in ipairs(candidates) do
+	for _, candidate in ipairs(results) do
 		max_sha_width = math.max(max_sha_width, #candidate.sha)
 		max_branch_width = math.max(max_branch_width, #(candidate.branch_display or candidate.branch))
 		max_status_width = math.max(max_status_width, #status_label(candidate))
@@ -1004,6 +1001,107 @@ function M.pick(opts)
 		},
 	})
 
+	return finders.new_table({
+		results = results,
+		entry_maker = function(entry)
+			return {
+				value = entry,
+				branch = entry.branch,
+				path = entry.path,
+				display_path = entry.display_path,
+				display = function()
+					local branch_display = entry.branch_display or entry.branch
+					local status_display = status_label(entry)
+					if status_display ~= "" then
+						local needs_attention = (entry.kind ~= "branch" and not entry.clean)
+							or (entry.kind == "worktree" and not entry.merged)
+							or (entry.tracking and entry.tracking ~= "")
+						local status_group = needs_attention and "DiagnosticWarn" or "DiagnosticInfo"
+						status_display = { status_display, status_group }
+					end
+					return displayer({
+						{ entry.sha, "Identifier" },
+						branch_display,
+						status_display,
+						{ entry.display_path, "diffFile" },
+					})
+				end,
+				ordinal = entry.sha .. " " .. entry.branch .. " " .. entry.display_path .. " " .. status_label(entry),
+			}
+		end,
+	})
+end
+
+local function refresh_picker_prs(prompt_bufnr, root)
+	-- Open with local rows, then enrich them without blocking Neovim.
+	local wt = wt_executable()
+	local picker = action_state.get_current_picker(prompt_bufnr)
+	if wt and picker and vim.api.nvim_buf_is_valid(prompt_bufnr) then
+		local output = {}
+		local job = vim.fn.jobstart({ wt, "__pr_list" }, {
+			cwd = root,
+			stdout_buffered = true,
+			on_stdout = function(_, data)
+				output = data or {}
+			end,
+			on_exit = function(_, code)
+				vim.schedule(function()
+					if
+						code ~= 0
+						or not picker
+						or not vim.api.nvim_buf_is_valid(prompt_bufnr)
+						or picker.closed
+						or action_state.get_current_picker(prompt_bufnr) ~= picker
+					then
+						return
+					end
+					local rows = parse_rows(table.concat(output, "\n"))
+					if #rows == 0 then
+						return
+					end
+					local selected = picker:get_selection()
+					local branch = selected and selected.value.branch
+					local pending = true
+					picker:register_completion_callback(function()
+						if not pending then
+							return
+						end
+						pending = false
+						for index = 1, picker.manager:num_results() do
+							local entry = picker.manager:get_entry(index)
+							if entry and entry.value.branch == branch then
+								picker:set_selection(picker:get_row(index))
+								break
+							end
+						end
+					end)
+					picker:refresh(candidate_finder(rows), { reset_prompt = false })
+				end)
+			end,
+		})
+		if job > 0 then
+			vim.api.nvim_create_autocmd("BufWipeout", {
+				buffer = prompt_bufnr,
+				once = true,
+				callback = function()
+					pcall(vim.fn.jobstop, job)
+				end,
+			})
+		end
+	end
+end
+
+function M.pick(opts)
+	opts = opts or {}
+	local candidates, err = get_candidates()
+	if not candidates then
+		vim.notify(err ~= "" and err or "Could not list worktrees", vim.log.levels.ERROR)
+		return
+	end
+	if #candidates == 0 then
+		vim.notify("No worktrees or local branches found", vim.log.levels.INFO)
+		return
+	end
 	pickers
 	    .new(opts, {
 		    prompt_title = "Worktrees",
@@ -1033,36 +1131,7 @@ function M.pick(opts)
 					    detached and "HEAD" or entry.value.branch)
 			    end,
 		    }),
-		    finder = finders.new_table({
-			    results = candidates,
-			    entry_maker = function(entry)
-				    return {
-					    value = entry,
-					    branch = entry.branch,
-					    path = entry.path,
-					    display_path = entry.display_path,
-					    display = function()
-						    local branch_display = entry.branch_display or entry.branch
-						    local status_display = status_label(entry)
-						    if status_display ~= "" then
-							    local needs_attention = (entry.kind ~= "branch" and not entry.clean)
-							        or (entry.kind == "worktree" and not entry.merged)
-							        or (entry.tracking and entry.tracking ~= "")
-							    local status_group = needs_attention and "DiagnosticWarn" or "DiagnosticInfo"
-							    status_display = { status_display, status_group }
-						    end
-						    return displayer({
-							    { entry.sha,          "Identifier" },
-							    branch_display,
-							    status_display,
-							    { entry.display_path, "diffFile" },
-					    })
-				    end,
-				    ordinal = entry.sha .. " " .. entry.branch .. " " .. entry.display_path
-				        .. " " .. status_label(entry),
-				    }
-			    end,
-		    }),
+		    finder = candidate_finder(candidates),
 		    sorter = conf.generic_sorter(opts),
 		    attach_mappings = function(prompt_bufnr, map)
 			    actions.select_default:replace(function()
@@ -1159,6 +1228,7 @@ function M.pick(opts)
 			    end
 			    map("i", "<C-d>", delete_selection)
 			    map("n", "<C-d>", delete_selection)
+			    refresh_picker_prs(prompt_bufnr, candidates[1].root)
 			    return true
 		    end,
 	    })

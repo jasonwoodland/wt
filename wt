@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+WT_SOURCE=${BASH_SOURCE[0]}
+while [ -L "$WT_SOURCE" ]; do
+  WT_SOURCE_DIR=$(cd "$(dirname "$WT_SOURCE")" && pwd)
+  WT_SOURCE=$(readlink "$WT_SOURCE")
+  [[ "$WT_SOURCE" == /* ]] || WT_SOURCE="$WT_SOURCE_DIR/$WT_SOURCE"
+done
+WT_LIB_DIR="$(cd "$(dirname "$WT_SOURCE")" && pwd)/lib"
+source "$WT_LIB_DIR/github.bash"
+
 usage() {
   cat <<'EOF'
 Usage: wt [options] [<branch> | <substring> | <path>]
@@ -13,6 +22,7 @@ worktrees and local branches when fzf is unavailable.
 Arguments:
   <branch>                  Switch to the branch's worktree, creating it if needed.
   <substring>               Match an existing worktree branch or directory name.
+  <pr-number>               Switch to a PR's linked-issue worktree or local branch.
   <path>                    Switch to a registered worktree by absolute path.
   .                         Switch to the repo root that owns .worktrees.
 
@@ -789,6 +799,7 @@ resolve_path() {
   local target="${1:-}"
   local existing_only="${2:-}"
   local root worktree_dir worktree_parent path branch name head kind git_dir
+  local pr_branch pr_status pr_mode
   local -a matched_paths matched_labels
 
   if [ -z "$target" ]; then
@@ -857,6 +868,20 @@ resolve_path() {
     fi
   done < <(worktree_branch_rows --include-detached)
 
+  # Use known PR aliases before substrings, but don't slow local issue-number
+  # navigation with a network lookup. Cleanup remains entirely local.
+  if [[ "$target" =~ ^[0-9]+$ ]] && [ "$existing_only" != existing ] && [ -z "${WT_PR_RESOLVING:-}" ]; then
+    pr_mode=cached
+    [ "${#matched_paths[@]}" -gt 0 ] || pr_mode=lookup
+    if pr_branch=$(resolve_pr_branch "$target" "$pr_mode"); then
+      WT_PR_RESOLVING=1 resolve_path "$pr_branch"
+      return $?
+    else
+      pr_status=$?
+      [ "$pr_status" -ne 2 ] || return 1
+    fi
+  fi
+
   if [ "${#matched_paths[@]}" -eq 1 ]; then
     printf '%s\n' "${matched_paths[0]}"
     return 0
@@ -905,6 +930,7 @@ format_rows() {
         if (f[3] == "root") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") "[root]"
         else if (f[8] == "0") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") "[unmerged]"
         if (f[9] != "") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") f[9]
+        if (f[10] != "") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") f[10]
         if (length(sha_label[i]) > sha_width) sha_width = length(sha_label[i])
         if (length(branch_label[i]) > branch_width) branch_width = length(branch_label[i])
         if (length(status_label[i]) > status_width) status_width = length(status_label[i])
@@ -924,14 +950,17 @@ format_rows() {
 pick_candidate() {
   local rows selection branch
 
-  rows=$(list_candidates)
+  rows=$(list_candidates | annotate_prs)
   if [ -z "$rows" ]; then
     echo "No worktrees or local branches found." >&2
     return 1
   fi
 
   if command -v fzf >/dev/null 2>&1; then
-    selection=$(printf '%s\n' "$rows" | format_rows 1 | fzf --height=~50% --delimiter=$'\t' --with-nth=2..) || return 130
+    local reload_command
+    printf -v reload_command '%q __pr_fzf' "$WT_LIB_DIR/../wt"
+    selection=$(printf '%s\n' "$rows" | format_rows 1 | fzf --height=~50% --delimiter=$'\t' --with-nth=2.. \
+      --bind "load:reload-sync($reload_command)+unbind(load)") || return 130
     branch=${selection%%$'\t'*}
     [ -n "$branch" ] || return 1
     resolve_path "$branch"
@@ -950,7 +979,7 @@ _wt() {
   local line branch worktree_path kind label sort sha clean_status merged_status status_label formatted_label display_path root_path cur wt_rows branch_label
   local REPLY
   local -a fields filtered_values filtered_labels
-  local branch_width sha_width max_branch_width=0 max_sha_width=0 i
+  local branch_width sha_width max_branch_width=0 max_sha_width=0 max_status_width=0 i
 
   _wt_fuzzy_match() {
     local needle="${1:l}" haystack="${2:l}" char
@@ -1011,6 +1040,20 @@ _wt() {
     REPLY="$path"
   }
 
+  _wt_status_label() {
+    local kind="$1" clean="$2" merged="$3" tracking="$4" prs="$5"
+    REPLY=""
+    [[ "$clean" != 0 ]] || REPLY="[dirty]"
+    if [[ "$kind" == root ]]; then
+      REPLY="${REPLY:+$REPLY }[root]"
+    elif [[ "$merged" == 0 ]]; then
+      REPLY="${REPLY:+$REPLY }[unmerged]"
+    fi
+    [[ -z "$tracking" ]] || REPLY="${REPLY:+$REPLY }$tracking"
+    [[ -z "$prs" ]] || REPLY="${REPLY:+$REPLY }$prs"
+    return 0
+  }
+
   cur="${words[CURRENT]}"
 
   if [[ "$cur" == -* ]]; then
@@ -1040,7 +1083,12 @@ _wt() {
     return
   fi
 
-  wt_rows=$(command wt __list 2>/dev/null)
+  if (( $+functions[_wt_pr_wait] )); then
+    _wt_pr_wait
+    wt_rows=$(command wt __list 2>/dev/null)
+  else
+    wt_rows=$(command wt __pr_list 2>/dev/null)
+  fi
 
   while IFS= read -r line; do
     fields=("${(@ps:\t:)line}")
@@ -1063,6 +1111,8 @@ _wt() {
     branch_width=${#branch_label}
     (( sha_width > max_sha_width )) && max_sha_width=$sha_width
     (( branch_width > max_branch_width )) && max_branch_width=$branch_width
+    _wt_status_label "$fields[3]" "$fields[7]" "$fields[8]" "$fields[9]" "$fields[10]"
+    (( ${#REPLY} > max_status_width )) && max_status_width=${#REPLY}
   done <<< "$wt_rows"
 
   while IFS= read -r line; do
@@ -1081,21 +1131,13 @@ _wt() {
     display_path="$REPLY"
     branch_label="$branch"
     [[ "$fields[4]" != detached ]] || branch_label="(detached)"
-    status_label=""
-    [[ "$clean_status" != 0 ]] || status_label="[dirty]"
-    if [[ "$kind" == root ]]; then
-      status_label="${status_label:+$status_label }[root]"
-    elif [[ "$merged_status" == 0 ]]; then
-      status_label="${status_label:+$status_label }[unmerged]"
-    fi
-    if [[ -n "$fields[9]" ]]; then
-      status_label="${status_label:+$status_label }$fields[9]"
-    fi
+    _wt_status_label "$kind" "$clean_status" "$merged_status" "$fields[9]" "$fields[10]"
+    status_label="$REPLY"
 
     if [[ -z "$display_path" ]]; then
-      printf -v formatted_label "%-${max_sha_width}s %-${max_branch_width}s %-16s" "$sha" "$branch_label" "$status_label"
+      printf -v formatted_label "%-${max_sha_width}s %-${max_branch_width}s %-${max_status_width}s" "$sha" "$branch_label" "$status_label"
     else
-      printf -v formatted_label "%-${max_sha_width}s %-${max_branch_width}s %-16s %s" "$sha" "$branch_label" "$status_label" "$display_path"
+      printf -v formatted_label "%-${max_sha_width}s %-${max_branch_width}s %-${max_status_width}s %s" "$sha" "$branch_label" "$status_label" "$display_path"
     fi
 
     if [[ "$sort" == 0 ]]; then
@@ -1112,7 +1154,7 @@ _wt() {
 
   if [[ -n "$cur" ]]; then
     for ((i = 1; i <= ${#values}; i++)); do
-      if _wt_fuzzy_match "$cur" "${values[i]}"; then
+      if _wt_fuzzy_match "$cur" "${values[i]}" || [[ "${labels[i]}" == *"[PR #${cur}]"* ]]; then
         filtered_values+=("${values[i]}")
         filtered_labels+=("${labels[i]}")
       fi
@@ -1136,7 +1178,18 @@ case "${1:-}" in
     print_zsh_completion
     ;;
   __list)
-    list_candidates
+    list_candidates | annotate_prs
+    ;;
+  __pr_refresh)
+    refresh_prs
+    ;;
+  __pr_list)
+    refresh_prs 2>/dev/null || true
+    list_candidates | annotate_prs
+    ;;
+  __pr_fzf)
+    refresh_prs 2>/dev/null || true
+    list_candidates | annotate_prs | format_rows 1
     ;;
   __latest_branch)
     latest_branch
