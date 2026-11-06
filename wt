@@ -9,6 +9,7 @@ while [ -L "$WT_SOURCE" ]; do
 done
 WT_LIB_DIR="$(cd "$(dirname "$WT_SOURCE")" && pwd)/lib"
 source "$WT_LIB_DIR/github.bash"
+source "$WT_LIB_DIR/hyperlinks.sh"
 
 usage() {
   cat <<'EOF'
@@ -897,7 +898,22 @@ resolve_path() {
 }
 
 format_rows() {
-  awk -F '\t' -v with_target="${1:-0}" '
+  awk -F '\t' -v with_target="${1:-0}" -v hyperlinks="${2:-0}" '
+    function link_prs(text, urls,    n, links, j, url, number, label, pos, replacement) {
+      if (!hyperlinks) return text
+      n = split(urls, links, " ")
+      for (j = 1; j <= n; j++) {
+        url = links[j]
+        if (url !~ /^https:\/\/[^[:space:][:cntrl:]]+\/pull\/[0-9]+$/) continue
+        number = url; sub(/^.*\/pull\//, "", number)
+        label = "[PR #" number "]"
+        pos = index(text, label)
+        if (!pos) continue
+        replacement = sprintf("%c]8;;%s%c\\%s%c]8;;%c\\", 27, url, 27, label, 27, 27)
+        text = substr(text, 1, pos - 1) replacement substr(text, pos + length(label))
+      }
+      return text
+    }
     function display_path(path,    npath, nroot, path_parts, root_parts, common, i, out) {
       if (path == "") return ""
       if (root_path != "" && path == root_path) return "."
@@ -934,13 +950,16 @@ format_rows() {
         if (length(sha_label[i]) > sha_width) sha_width = length(sha_label[i])
         if (length(branch_label[i]) > branch_width) branch_width = length(branch_label[i])
         if (length(status_label[i]) > status_width) status_width = length(status_label[i])
+        urls[i] = f[11]
       }
       for (i = 1; i <= NR; i++) {
         if (with_target) printf "%s\t", targets[i]
+        # Pad plain text before adding zero-width terminal sequences.
+        status = link_prs(sprintf("%-" status_width "s", status_label[i]), urls[i])
         if (shown_path[i] == "") {
-          printf "%-" sha_width "s %-" branch_width "s %-" status_width "s\n", sha_label[i], branch_label[i], status_label[i]
+          printf "%-" sha_width "s %-" branch_width "s %s\n", sha_label[i], branch_label[i], status
         } else {
-          printf "%-" sha_width "s %-" branch_width "s %-" status_width "s %s\n", sha_label[i], branch_label[i], status_label[i], shown_path[i]
+          printf "%-" sha_width "s %-" branch_width "s %s %s\n", sha_label[i], branch_label[i], status, shown_path[i]
         }
       }
     }
@@ -957,9 +976,18 @@ pick_candidate() {
   fi
 
   if command -v fzf >/dev/null 2>&1; then
-    local reload_command
-    printf -v reload_command '%q __pr_fzf' "$WT_LIB_DIR/../wt"
-    selection=$(printf '%s\n' "$rows" | format_rows 1 | fzf --height=~50% --delimiter=$'\t' --with-nth=2.. \
+    local reload_command version links=0
+    local -a fzf_args
+    if wt_hyperlinks_enabled; then
+      version=$(fzf --version 2>/dev/null || true)
+      if [[ "$version" =~ ^([0-9]+)\.([0-9]+) ]] && \
+        { [ "${BASH_REMATCH[1]}" -gt 0 ] || [ "${BASH_REMATCH[2]}" -ge 55 ]; }; then
+        links=1
+        fzf_args+=(--ansi)
+      fi
+    fi
+    printf -v reload_command '%q __pr_fzf %s' "$WT_LIB_DIR/../wt" "$links"
+    selection=$(printf '%s\n' "$rows" | format_rows 1 "$links" | fzf "${fzf_args[@]}" --height=~50% --delimiter=$'\t' --with-nth=2.. \
       --bind "load:reload-sync($reload_command)+unbind(load)") || return 130
     branch=${selection%%$'\t'*}
     [ -n "$branch" ] || return 1
@@ -970,6 +998,7 @@ pick_candidate() {
 }
 
 print_zsh_completion() {
+  cat "$WT_LIB_DIR/hyperlinks.sh"
   cat <<'EOF'
 #compdef wt
 
@@ -980,6 +1009,35 @@ _wt() {
   local REPLY
   local -a fields filtered_values filtered_labels
   local branch_width sha_width max_branch_width=0 max_sha_width=0 max_status_width=0 i
+  local links=0
+  wt_hyperlinks_enabled && links=1
+  local -a pr_link_colors
+
+  _wt_pr_color_code() {
+    # complist wraps these values in SGR. Emit OSC between two complete SGRs,
+    # so it stays in the zero-width rendering layer, outside the label text.
+    REPLY=$'0m\e]8;;'"$1"$'\e\\\e[0'
+    REPLY=${REPLY//\\/\\\\}
+    REPLY=${REPLY//:/\\:}
+  }
+
+  _wt_link_prs() {
+    local url number open close pattern='(wt-branches)=(#b)' codes found=0
+    _wt_pr_color_code ''
+    close=$REPLY
+    codes=$close
+    for url in ${=1}; do
+      [[ "$url" =~ '^https://[^[:space:][:cntrl:]]+/pull/[0-9]+$' ]] || continue
+      number=${url##*/}
+      _wt_pr_color_code "$url"
+      open=$REPLY
+      pattern+="(*)(\\[PR \\#$number\\])"
+      codes+="=$close=$open"
+      found=1
+    done
+    (( found )) && pr_link_colors+=("$pattern(*)=$codes=$close")
+    return 0
+  }
 
   _wt_fuzzy_match() {
     local needle="${1:l}" haystack="${2:l}" char
@@ -1089,6 +1147,12 @@ _wt() {
   else
     wt_rows=$(command wt __pr_list 2>/dev/null)
   fi
+  if (( links )); then
+    zmodload zsh/complist 2>/dev/null || links=0
+    if (( links && $+functions[_setup] )); then
+      _setup wt-branches
+    fi
+  fi
 
   while IFS= read -r line; do
     fields=("${(@ps:\t:)line}")
@@ -1139,6 +1203,9 @@ _wt() {
     else
       printf -v formatted_label "%-${max_sha_width}s %-${max_branch_width}s %-${max_status_width}s %s" "$sha" "$branch_label" "$status_label" "$display_path"
     fi
+    if (( links )); then
+      _wt_link_prs "$fields[11]"
+    fi
 
     if [[ "$sort" == 0 ]]; then
       active_values+=("$branch")
@@ -1151,6 +1218,9 @@ _wt() {
 
   values=("${active_values[@]}" "${normal_values[@]}")
   labels=("${active_labels[@]}" "${normal_labels[@]}")
+  # _main_complete publishes _comp_colors after this function returns. Scope
+  # every rule to our group, retaining the user's other completion colors.
+  (( ${#pr_link_colors} )) && _comp_colors=("${pr_link_colors[@]}" "${_comp_colors[@]}")
 
   if [[ -n "$cur" ]]; then
     for ((i = 1; i <= ${#values}; i++)); do
@@ -1189,7 +1259,7 @@ case "${1:-}" in
     ;;
   __pr_fzf)
     refresh_prs 2>/dev/null || true
-    list_candidates | annotate_prs | format_rows 1
+    list_candidates | annotate_prs | format_rows 1 "${2:-0}"
     ;;
   __latest_branch)
     latest_branch

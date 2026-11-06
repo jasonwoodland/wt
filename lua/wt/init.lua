@@ -9,6 +9,7 @@ local entry_display = require("telescope.pickers.entry_display")
 local M = {}
 
 local git_log_preview_ns = vim.api.nvim_create_namespace("wt_git_log_preview")
+local pr_links_ns = vim.api.nvim_create_namespace("wt_pr_links")
 
 local ansi_groups = {
 	["30"] = "WtAnsiBlack",
@@ -317,21 +318,16 @@ local function parse_rows(output)
 	end
 
 	for line in output:gmatch("[^\n]+") do
-		local branch, path, kind, label, sort, sha, clean, merged, tracking, prs =
-		    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-		if not branch then
-			branch, path, kind, label, sort, sha, clean, merged, tracking =
-			    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-		end
-		if not branch then
-			branch, path, kind, label, sort, sha, clean, merged =
-			    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-		end
-		if not branch then
-			branch, path, kind, label, sort, sha =
-			    line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-		end
-		if branch and branch ~= "" then
+		local fields = vim.split(line, "\t", { plain = true })
+		local branch, path, kind, label, sort, sha, clean, merged, tracking, prs, urls = unpack(fields)
+		if #fields >= 6 and branch ~= "" then
+			local pr_urls = {}
+			for url in (urls or ""):gmatch("%S+") do
+				local number = url:match("^https://[^%s%c]+/pull/(%d+)$")
+				if number then
+					pr_urls[number] = url
+				end
+			end
 			if label == "-" then
 				label = ""
 			end
@@ -348,6 +344,7 @@ local function parse_rows(output)
 				merged = merged == "1",
 				tracking = tracking or "",
 				prs = prs or "",
+				pr_urls = pr_urls,
 				sort = tonumber(sort) or 1,
 			})
 		end
@@ -1032,6 +1029,74 @@ local function candidate_finder(results)
 	})
 end
 
+local function collect_pr_urls(rows)
+	local urls = {}
+	for _, row in ipairs(rows) do
+		for number, url in pairs(row.pr_urls or {}) do
+			urls[number] = url
+		end
+	end
+	return urls
+end
+
+local function attach_pr_links(prompt_bufnr, rows)
+	local picker = action_state.get_current_picker(prompt_bufnr)
+	if not picker then
+		return
+	end
+	picker._wt_pr_urls = collect_pr_urls(rows)
+	if vim.env.WT_HYPERLINKS == "never" or vim.env.WT_HYPERLINKS == "0" then
+		return
+	end
+	local bufnr = picker.results_bufnr
+	if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+		return
+	end
+	local pending, unsupported = false, false
+	local function schedule_links()
+		if pending or unsupported then
+			return
+		end
+		pending = true
+		vim.schedule(function()
+			pending = false
+			if picker.closed or not vim.api.nvim_buf_is_valid(bufnr) then
+				return
+			end
+			vim.api.nvim_buf_clear_namespace(bufnr, pr_links_ns, 0, -1)
+			for row, line in ipairs(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) do
+				local from = 1
+				while true do
+					local first, last, number = line:find("%[PR #(%d+)%]", from)
+					if not first then
+						break
+					end
+					local url = picker._wt_pr_urls[number]
+					if url then
+						local ok = pcall(
+							vim.api.nvim_buf_set_extmark,
+							bufnr,
+							pr_links_ns,
+							row - 1,
+							first - 1,
+							{ end_row = row - 1, end_col = last, url = url }
+						)
+						-- Older Neovim versions can retain plain labels.
+						if not ok then
+							unsupported = true
+							return
+						end
+					end
+					from = last + 1
+				end
+			end
+		end)
+	end
+	vim.api.nvim_buf_attach(bufnr, false, { on_lines = schedule_links })
+	picker:register_completion_callback(schedule_links)
+	schedule_links()
+end
+
 local function refresh_picker_prs(prompt_bufnr, root)
 	-- Open with local rows, then enrich them without blocking Neovim.
 	local wt = wt_executable()
@@ -1060,6 +1125,7 @@ local function refresh_picker_prs(prompt_bufnr, root)
 						return
 					end
 					local selected = picker:get_selection()
+					picker._wt_pr_urls = collect_pr_urls(rows)
 					local branch = selected and selected.value.branch
 					local pending = true
 					picker:register_completion_callback(function()
@@ -1228,6 +1294,7 @@ function M.pick(opts)
 			    end
 			    map("i", "<C-d>", delete_selection)
 			    map("n", "<C-d>", delete_selection)
+			    attach_pr_links(prompt_bufnr, candidates)
 			    refresh_picker_prs(prompt_bufnr, candidates[1].root)
 			    return true
 		    end,

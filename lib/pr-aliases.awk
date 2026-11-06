@@ -3,7 +3,7 @@ function issue_match(value, number) {
   return value ~ ("(^|[^0-9])" number "([^0-9]|$)")
 }
 FILENAME == ARGV[1] {
-  count++; numbers[count]=$1; heads[count]=$2; forks[count]=$3; issues[count]=$4
+  count++; numbers[count]=$1; heads[count]=$2; forks[count]=$3; issues[count]=$4; urls[count]=$5
   next
 }
 FILENAME == ARGV[2] {
@@ -21,11 +21,11 @@ END {
       name=path; sub(/^.*\//, "", name)
       for (j=1; j<=n; j++) {
         if (linked[j] != "" && (issue_match(branch, linked[j]) || issue_match(name, linked[j]))) {
-          print numbers[i] "\t" branch; found=1; break
+          print numbers[i] "\t" branch "\t" urls[i]; found=1; break
         }
       }
     }
     if (!found && forks[i] == "false" && heads[i] in branches)
-      print numbers[i] "\t" heads[i]
+      print numbers[i] "\t" heads[i] "\t" urls[i]
   }
 }

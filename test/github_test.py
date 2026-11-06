@@ -30,12 +30,16 @@ import os,sys,time
 from pathlib import Path
 with open(os.environ['PR_TRACE'],'a') as f: f.write(' '.join(sys.argv[1:])+'\\n')
 time.sleep(float(os.environ.get('PR_DELAY','0')))
-print(Path(os.environ['PR_DATA']).read_text(),end='')
+for line in Path(os.environ['PR_DATA']).read_text().splitlines():
+    fields=line.split('\\t')
+    if len(fields)==4:
+        fields.append('https://github.com/example/repo/pull/'+fields[0])
+    print('\\t'.join(fields))
 sys.exit(int(os.environ.get('PR_FAIL','0')))
 ''')
     gh.chmod(0o755)
     env = dict(os.environ, PATH=f"{bin_dir}:{ROOT}:{os.environ['PATH']}",
-               PR_DATA=str(data), PR_TRACE=str(trace),
+               PR_DATA=str(data), PR_TRACE=str(trace), WT_HYPERLINKS="never",
                GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
 
     def git(*args):
@@ -124,13 +128,19 @@ _wt
         label = next(label for label in labels if label.endswith(" " + relative))
         path_columns.append(len(label) - len(relative))
     assert len(set(path_columns)) == 1, "Completion paths must align after long status and PR labels"
+    linked_labels = subprocess.check_output(["zsh", "-f", "-c", label_script], cwd=repo,
+                                            env=dict(env, WT_HYPERLINKS="always"), text=True)
+    link_start = "\x1b]8;;https://github.com/example/repo/pull/456\x1b\\"
+    link_end = "\x1b]8;;\x1b\\"
+    assert linked_labels.splitlines() == labels, "Descriptions must stay plain for ZLE width calculations"
+    assert "\x1b" not in wt("__list", WT_HYPERLINKS="always").stdout, "Raw rows must remain plain"
 
     # Actual ZLE hooks: type wt without Return, wait, then consume the same job.
     trace.write_text("")
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(repo)
-        os.execvpe("zsh", ["zsh", "-f"], dict(env, TERM="xterm-256color", PR_DELAY="0.3"))
+        os.execvpe("zsh", ["zsh", "-f"], dict(env, TERM="xterm-256color", PR_DELAY="0.3", WT_HYPERLINKS="always"))
 
     def drain():
         result = b""
@@ -175,12 +185,9 @@ _wt
         while b"PR #456" not in screen and time.monotonic() < deadline:
             screen += drain()
         assert b"PR #456" in screen, screen[-2000:]
+        assert link_start.encode() in screen, repr(screen[-4000:])
         assert b"obsolete-completion" not in screen
-        os.write(fd, b"\x07")  # Leave menu selection before replacing the line.
-        # Replace the line with a check, without starting another prompt.
-        os.write(fd, b"\x15_wt_pr_wait; print PREFETCH_DONE\r")
-        time.sleep(0.2)
-        assert b"PREFETCH_DONE" in drain()
+        # Both Tab invocations must reuse the prefetch on this command line.
         assert trace.read_text().count("api graphql") == 1
     finally:
         os.kill(pid, signal.SIGKILL)
@@ -188,13 +195,20 @@ _wt
         os.close(fd)
 
     # Exercise the installed fzf, not a mock: PRs appear after the picker opens.
-    if shutil.which("fzf"):
+    if os.environ.get("WT_TEST_FZF"):
+        (bin_dir / "fzf").symlink_to(os.environ["WT_TEST_FZF"])
+    if shutil.which("fzf", path=env["PATH"]):
+        version = subprocess.check_output(["fzf", "--version"], env=env, text=True).split()[0]
+        supports_links = tuple(map(int, version.split(".")[:2])) >= (0, 55)
         cache.unlink(missing_ok=True)
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(repo)
-            os.execve(WT, [WT], dict(env, TERM="xterm-256color", PR_DELAY="0.3",
-                                     FZF_DEFAULT_OPTS="--no-height --no-clear --no-mouse"))
+            fzf_env = dict(env, TERM="xterm-256color", PR_DELAY="0.3", WT_HYPERLINKS="always",
+                           FZF_DEFAULT_OPTS="--no-height --no-clear --no-mouse")
+            # fzf disables its ANSI rendering layer when NO_COLOR is set.
+            fzf_env.pop("NO_COLOR", None)
+            os.execve(WT, [WT], fzf_env)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 140, 0, 0))
         try:
             screen = b""
@@ -202,6 +216,7 @@ _wt
             while b"PR #456" not in screen and time.monotonic() < deadline:
                 screen += drain()
             assert b"PR #456" in screen, screen[-2000:]
+            assert (link_start.encode() in screen) == supports_links, "fzf hyperlink version fallback failed"
             os.write(fd, b"456")
             time.sleep(0.2)
             drain()
@@ -244,6 +259,16 @@ assert(vim.wait(5000, function()
 end, 20), 'PR metadata did not refresh')
 assert(picker:_get_prompt() == 'login', 'refresh reset query')
 assert(picker:get_selection().value.branch == 'feature/123-login', 'refresh changed branch')
+local ns = vim.api.nvim_get_namespaces().wt_pr_links
+local function link_marks()
+  return vim.api.nvim_buf_get_extmarks(picker.results_bufnr, ns, 0, -1, { details = true })
+end
+assert(vim.wait(1000, function() return #link_marks() > 0 end, 20), 'URL extmark missing')
+assert(link_marks()[1][4].url == 'https://github.com/example/repo/pull/456', 'wrong URL')
+local rendered = table.concat(vim.api.nvim_buf_get_lines(picker.results_bufnr, 0, -1, false), '\\n')
+assert(not rendered:find(string.char(27), 1, true), 'raw escape in results buffer')
+picker:set_prompt('main')
+assert(vim.wait(1000, function() return #link_marks() == 0 end, 20), 'stale URL after filtering')
 require('telescope.actions').close(picker.prompt_bufnr)
 -- Closing before the next request finishes must be safe too.
 require('wt').pick({})
@@ -253,7 +278,7 @@ vim.wait(500, function() return false end, 20)
 print('real Telescope async refresh passed')
 ''')
         result = subprocess.run(["nvim", "--headless", "-u", "NONE", "-c", f"lua dofile('{lua}')", "-c", "qa!"],
-                                cwd=repo, env=dict(env, PR_DELAY="0.3", WT_SOURCE=str(ROOT), WT_PLUGINS=str(plugins)),
+                                cwd=repo, env=dict(env, PR_DELAY="0.3", WT_SOURCE=str(ROOT), WT_PLUGINS=str(plugins), WT_HYPERLINKS="always"),
                                 capture_output=True, text=True, timeout=15)
         output = result.stdout + result.stderr
         assert "real Telescope async refresh passed" in output, (result.returncode, output)
@@ -269,4 +294,27 @@ print('real Telescope async refresh passed')
     assert time.monotonic() - start < 10, "A stalled gh must be bounded"
     assert cache.read_text() == snapshot
     assert not list(cache.parent.glob("wt-prs.*")), "Failed refresh left temporary files"
-    print("PR aliases, cache failures/timeout, ZLE prefetch, real fzf and Telescope refresh passed")
+
+    # A row may link several PRs; disabling links preserves exactly the text
+    # and column layout. Old snapshots still work until their next refresh.
+    data.write_text("456\tother-head\tfalse\t123\n457\tother-head\tfalse\t123\n")
+    linked = wt("__pr_fzf", "1").stdout
+    plain = wt("__pr_fzf", "0").stdout
+    for number in (456, 457):
+        opening = f"\x1b]8;;https://github.com/example/repo/pull/{number}\x1b\\"
+        assert opening + f"[PR #{number}]" + link_end in linked
+        linked = linked.replace(opening, "")
+    assert linked.replace(link_end, "") == plain
+    raw = wt("__list").stdout
+    assert "\x1b" not in raw
+    assert wt("__pr_refresh").returncode == 0
+    header = cache.read_text().splitlines()[0]
+    cache.write_text(header + "\n456\tother-head\tfalse\t123\n")
+    legacy = wt("__pr_fzf", "1", PR_FAIL="1").stdout
+    assert "[PR #456]" in legacy and "\x1b" not in legacy
+    resolved(456, issue)
+    # Never render control characters from a malformed cached URL.
+    data.write_text("456\tother-head\tfalse\t123\thttps://example.com/pull/456\x1bBAD\n")
+    malformed = wt("__pr_fzf", "1").stdout
+    assert "[PR #456]" in malformed and "\x1b" not in malformed
+    print("PR aliases, cache failures/timeout, OSC 8 links, ZLE, real fzf and Telescope refresh passed")

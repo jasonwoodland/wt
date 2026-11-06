@@ -68,7 +68,7 @@ refresh_prs() (
       . as $pr | [(.number|tostring), .headRefName, (.isCrossRepository|tostring),
       ([.closingIssuesReferences.nodes[]? |
         select((.url|split("/issues/")[0]) == ($pr.url|split("/pull/")[0])) |
-        .number|tostring] | join(","))] | @tsv' >> "$tmp" || return 1
+        .number|tostring] | join(",")), .url] | @tsv' >> "$tmp" || return 1
   # A remote change during the request must not publish metadata for the old repo.
   [ "$identity" = "$(pr_identity)" ] || return 1
   mv -f "$tmp" "$cache"
@@ -105,8 +105,13 @@ annotate_prs() {
     return
   fi
   awk -F '\t' 'BEGIN { OFS="\t" }
-    FILENAME == ARGV[1] { labels[$2] = labels[$2] (labels[$2] == "" ? "" : " ") "[PR #" $1 "]"; next }
-    { $10 = ($4 == "detached" ? "" : labels[$1]); print }
+    FILENAME == ARGV[1] {
+      labels[$2] = labels[$2] (labels[$2] == "" ? "" : " ") "[PR #" $1 "]"
+      if ($3 ~ /^https:\/\/[^[:space:][:cntrl:]]+\/pull\/[0-9]+$/)
+        urls[$2] = urls[$2] (urls[$2] == "" ? "" : " ") $3
+      next
+    }
+    { $10 = ($4 == "detached" ? "" : labels[$1]); $11 = ($4 == "detached" ? "" : urls[$1]); print }
   ' <(pr_aliases <(printf '%s\n' "$prs")) <(printf '%s\n' "$rows")
 }
 
@@ -123,9 +128,9 @@ resolve_pr_branch() (
       . as $pr | [(.number|tostring), .headRefName, (.isCrossRepository|tostring),
       ([.closingIssuesReferences[]? |
         select((.url|split("/issues/")[0]) == ($pr.url|split("/pull/")[0])) |
-        .number|tostring] | join(","))] | @tsv' 2>/dev/null) || return 1
+        .number|tostring] | join(",")), .url] | @tsv' 2>/dev/null) || return 1
   fi
-  aliases=$(pr_aliases <(printf '%s\n' "$prs") | cut -f2- | sort -u)
+  aliases=$(pr_aliases <(printf '%s\n' "$prs") | cut -f2 | sort -u)
   [ -n "$aliases" ] || return 1
   if [[ "$aliases" == *$'\n'* ]]; then
     echo "PR #$number matches multiple linked-issue worktrees; use a branch or path:" >&2

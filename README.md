@@ -105,6 +105,19 @@ fetches synchronously. There is no periodic daemon or refresh on every keystroke
 After updating `wt`, source `zsh/init.zsh` again (or open a new shell) to reload
 any completion function that the current shell has already loaded.
 
+PR labels are clickable hyperlinks in supported terminals. Zsh uses completion
+rendering attributes so the URL takes no column width; fzf uses OSC 8 with
+`--ansi` on fzf 0.55 or newer, and keeps plain labels on older versions.
+fzf's `NO_COLOR`/`--no-color` mode also disables its hyperlink rendering.
+Telescope uses Neovim URL extmarks when that API is available. Clicking uses the
+terminal's usual link gesture; Enter still selects the branch or worktree.
+Shell rendering detects common supporting terminals automatically. Set
+`WT_HYPERLINKS=always` to enable links when detection misses your terminal, or
+`WT_HYPERLINKS=never` to disable links in all three interfaces. Raw `wt __list`
+rows and navigation output always stay plain. URLs come from the same PR
+snapshot, with no additional GitHub requests; older snapshots gain links on
+their next successful refresh.
+
 ## Telescope picker
 
 The Telescope, fzf, and zsh completion pickers list existing worktrees and local branches as `{sha}  {branch name}  [dirty] [unmerged]  {relative worktree path}`. `[dirty]` means the worktree has tracked or untracked changes; `[unmerged]` means a linked worktree has commits that are not reachable from the root worktree's `HEAD`. Clean worktrees with no commits ahead of root show neither of these labels, including branches at the same commit as root or already merged into it. The root worktree shows `[root]` instead of a merge status, alongside `[dirty]` when applicable. Branch-only rows omit cleanliness and merge labels. The path is shown only for existing worktrees, including worktrees outside `.worktrees`; branch-only rows omit the path. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
