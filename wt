@@ -22,7 +22,7 @@ worktrees and local branches when fzf is unavailable.
 
 Arguments:
   <branch>                  Switch to the branch's worktree, creating it if needed.
-  <substring>               Match an existing worktree branch or directory name.
+  <substring>               Match a local branch or existing worktree directory name.
   <pr-number>               Switch to a PR's linked-issue worktree or local branch.
   <path>                    Switch to a registered worktree by absolute path.
   .                         Switch to the repo root that owns .worktrees.
@@ -44,7 +44,7 @@ Options:
       --zsh-completion      Print the zsh completion definition.
 
 Exact branches take priority. Otherwise, a literal, case-sensitive substring
-must match exactly one existing worktree; multiple matches are listed as an error.
+must match exactly one branch or worktree; multiple matches are listed as an error.
 
 Cleanup skips worktrees ahead of upstream and requires a merge into root HEAD
 or a merged PR matching HEAD. --all skips these checks.
@@ -889,7 +889,7 @@ resolve_path() {
     return 0
   fi
 
-  # Only fall back to existing worktrees after exact branch resolution.
+  # Only fall back to substring matches after exact branch resolution.
   # Quote the target so glob characters are treated literally.
   while IFS=$'\t' read -r branch path head kind; do
     name="${path##*/}"
@@ -900,6 +900,16 @@ resolve_path() {
       matched_labels+=("$branch ($path)")
     fi
   done < <(worktree_branch_rows --include-detached)
+
+  if [ "$existing_only" != existing ] && [ "${#matched_paths[@]}" -eq 0 ]; then
+    while IFS=$'\t' read -r branch head; do
+      [[ "$branch" == *"$target"* ]] || continue
+      path=$(worktree_path_for_branch "$branch")
+      [ -z "$path" ] || continue
+      matched_paths+=("$branch")
+      matched_labels+=("$branch (no worktree)")
+    done < <(branch_ref_rows)
+  fi
 
   # Use known PR aliases before substrings, but don't slow local issue-number
   # navigation with a network lookup. Cleanup remains entirely local.
@@ -916,16 +926,20 @@ resolve_path() {
   fi
 
   if [ "${#matched_paths[@]}" -eq 1 ]; then
-    printf '%s\n' "${matched_paths[0]}"
-    return 0
+    if [[ "${matched_paths[0]}" == /* ]]; then
+      printf '%s\n' "${matched_paths[0]}"
+      return 0
+    fi
+    resolve_path "${matched_paths[0]}"
+    return $?
   fi
   if [ "${#matched_paths[@]}" -gt 1 ]; then
-    echo "Multiple worktrees match '$target'; use a full branch name or path:" >&2
+    echo "Multiple branches or worktrees match '$target'; use a full branch name or path:" >&2
     printf '  %s\n' "${matched_labels[@]}" >&2
     return 1
   fi
 
-  echo "Branch '$target' does not exist and no worktree matches it." >&2
+  echo "Branch '$target' does not exist and no branch or worktree matches it." >&2
   return 1
 }
 

@@ -14,7 +14,7 @@ worktrees and local branches when fzf is unavailable.
 
 Arguments:
   <branch>                  Switch to the branch's worktree, creating it if needed.
-  <substring>               Match an existing worktree branch or directory name.
+  <substring>               Match a local branch or existing worktree directory name.
   <pr-number>               Switch to a PR's linked-issue worktree or local branch.
   <path>                    Switch to a registered worktree by absolute path.
   .                         Switch to the repo root that owns .worktrees.
@@ -36,7 +36,7 @@ Options:
       --zsh-completion      Print the zsh completion definition.
 
 Exact branches take priority. Otherwise, a literal, case-sensitive substring
-must match exactly one existing worktree; multiple matches are listed as an error.
+must match exactly one branch or worktree; multiple matches are listed as an error.
 
 Cleanup skips worktrees ahead of upstream and requires a merge into root HEAD
 or a merged PR matching HEAD. --all skips these checks.
@@ -61,7 +61,7 @@ The zsh function changes the current shell directory. When called directly,
 the executable prints the destination path for navigation commands.
 ```
 
-If the argument is not an exact local branch, `wt` searches existing worktree branch names and directory names for that literal, case-sensitive substring. For example, `wt 123` can switch to `feature/123-login`, and `wt login` works too. A single match switches directly; multiple matches are listed as an error so you can choose a full branch name or path. Exact branches take priority, including branches whose worktrees need creating. Tab completion also supports fuzzy matching.
+If the argument is not an exact local branch, `wt` searches existing worktree branch names and directory names for that literal, case-sensitive substring. If none match, it searches local branches without worktrees. For example, `wt 123` can switch to `feature/123-login`, and `wt login` works too. A single match switches directly, creating a worktree if needed; multiple matches are listed as an error so you can choose a full branch name or path. Exact branches take priority, including branches whose worktrees need creating. Tab completion also supports fuzzy matching.
 
 ## Installation
 
@@ -79,7 +79,7 @@ source "$HOME/Developer/github.com/jasonwoodland/wt/zsh/init.zsh"
 
 With `gh` installed and authenticated, listings show `[PR #456]` on the
 corresponding local branch or worktree. `wt 456` first resolves an exact local
-branch, then a cached PR alias, then the usual worktree substring match. When
+branch, then a cached PR alias, then the usual local branch or worktree substring match. When
 none matches, it looks up PR #456 on GitHub. A PR prefers an
 existing worktree whose branch or directory contains one of its linked issue
 numbers as a complete numeric token (`123` matches `feature/123-login`, but not

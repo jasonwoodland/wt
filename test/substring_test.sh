@@ -36,4 +36,17 @@ git branch 123
 [ "$("$WT" 123 2>"$TASK_TMP/err")" = "$repo/.worktrees/123" ]
 git worktree add -q --detach .worktrees/detached-456
 [ "$("$WT" 456)" = "$repo/.worktrees/detached-456" ]
+# Local branches without worktrees participate in literal substring matching.
+git branch fix/380-dashboard-ui-improvements
+[ "$("$WT" 380)" = "$repo/.worktrees/fix/380-dashboard-ui-improvements" ]
+git branch feature/789-first
+git branch feature/789-second
+if "$WT" 789 >"$TASK_TMP/out" 2>"$TASK_TMP/err"; then exit 1; fi
+[ ! -s "$TASK_TMP/out" ]
+[[ $(cat "$TASK_TMP/err") == *feature/789-first*feature/789-second* ]]
+[ ! -d .worktrees/feature/789-first ]
+# Existing worktree matches take priority over branches without worktrees.
+git worktree add -q .worktrees/first feature/789-first
+[ "$("$WT" 789)" = "$repo/.worktrees/first" ]
+[ ! -d .worktrees/feature/789-second ]
 printf 'all substring tests passed\n'
