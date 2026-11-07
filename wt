@@ -28,17 +28,17 @@ Arguments:
   .                         Switch to the repo root that owns .worktrees.
 
 Options:
+  -a, --all                 With --clean, include all clean worktrees.
+                            Skip merge and ahead safeguards.
   -b, --branch <branch>      Create a branch from the root HEAD and switch to it.
-  -c, --clean [<target>]     Remove clean non-main worktrees after confirmation.
+  -c, --clean [<target>]     Remove eligible merged worktrees after confirmation.
                             Optionally select one by branch, substring, or path.
   -d, --delete <branch>      Remove the clean worktree, then delete the branch
                             if Git considers it fully merged.
   -f, --force                With --clean, skip confirmation.
   -h, --help                 Show this help.
+  -i, --interactive         With --clean, select worktrees using fzf multi-select.
   -l, --latest               Switch to the latest local branch by committer date.
-  -m, --merged [<rev>]       With --clean, only remove worktrees merged into <rev>.
-                            Requires commits since creation by wt.
-                            Defaults to the root worktree HEAD.
   -M, --move [<old>] <new>    Rename a branch and move its worktree, if one exists.
                             <old> defaults to the current branch.
       --zsh-completion      Print the zsh completion definition.
@@ -46,8 +46,9 @@ Options:
 Exact branches take priority. Otherwise, a literal, case-sensitive substring
 must match exactly one existing worktree; multiple matches are listed as an error.
 
-Cleanup never removes dirty worktrees, even with --force. The short cleanup
-options -c, -f, and -m can be combined.
+Cleanup skips worktrees ahead of upstream and requires a merge into root HEAD
+or a merged PR matching HEAD. --all skips these checks.
+Dirty worktrees and root are always protected. Combine -c, -f, -a, and -i as needed.
 
 Examples:
   wt feature/login          Switch to an existing branch's worktree.
@@ -55,12 +56,14 @@ Examples:
   wt login                  Switch to the worktree matching login.
   wt -b feature/search      Create a branch and switch to its worktree.
   wt -M feature/find        Rename the current branch and move its worktree.
-  wt -cm                    Remove clean worktrees merged into the root HEAD.
-  wt -cf 320                Remove the clean worktree matching 320.
-  wt -cm main 320           Remove matching worktree if merged into main.
-  wt -cm -- 320             Use root HEAD as the merge reference for matching 320.
-  wt -cfm                   Do the same without confirmation.
-  wt -c --merged main       Remove clean worktrees merged into main.
+  wt -c                     Remove eligible merged worktrees after confirmation.
+  wt -cf                    Do the same without confirmation.
+  wt -cf 320                Clean matching worktree if it passes safeguards.
+  wt -ca                    Remove all clean worktrees after confirmation.
+  wt -cfa                   Remove all clean worktrees without confirmation.
+  wt -ci                    Pick eligible worktrees to clean with fzf.
+  wt -ciaf                  Pick from all clean worktrees; skip confirmation.
+  wt -c --all login         Remove matching clean worktree after confirmation.
 
 The zsh function changes the current shell directory. When called directly,
 the executable prints the destination path for navigation commands.
@@ -423,15 +426,15 @@ relative_path_for_root() {
 worktree_is_clean() {
   local path="$1" status
 
-  status=$(git -C "$path" status --porcelain --untracked-files=all 2>/dev/null || true)
+  status=$(git -C "$path" status --porcelain --untracked-files=all 2>/dev/null) || return 1
   [ -z "$status" ]
 }
 
 clean_usage() {
   cat >&2 <<'EOF'
-Usage: wt [--clean | -c] [--force | -f] [--merged | -m [<rev>]] [<target>]
-       wt -cm [<rev>] [<target>]
-       wt -cm -- <target>
+Usage: wt [--clean | -c] [--force | -f] [--all | -a] [--interactive | -i] [<target>]
+       wt -cf [<target>]
+       wt -cfa [<target>]
 EOF
 }
 
@@ -439,7 +442,7 @@ is_clean_option_token() {
   local arg="${1:-}" flags
 
   case "$arg" in
-    --clean|--merged|--merged=*)
+    --clean|--all|--force|--interactive)
       return 0
       ;;
     -)
@@ -449,19 +452,13 @@ is_clean_option_token() {
       flags=${arg#-}
       [ -n "$flags" ] || return 1
       case "$flags" in
-        *[!cfm]*) return 1 ;;
+        *[!cfai]*) return 1 ;;
         *) return 0 ;;
       esac
       ;;
   esac
 
   return 1
-}
-
-is_merged_rev_token() {
-  local arg="${1:-}"
-
-  [ -n "$arg" ] && [[ "$arg" != -* ]]
 }
 
 worktree_is_merged_to() {
@@ -472,16 +469,49 @@ worktree_is_merged_to() {
   git merge-base --is-ancestor "$candidate_head" "$target_commit" 2>/dev/null
 }
 
-worktree_has_commits_since_creation() {
-  local path="$1" git_dir start_commit candidate_head
+worktree_is_ahead_of_upstream() {
+  local path="$1" branch tracking
+  # Detached or unreadable tracking state cannot qualify for upstream cleanup.
+  branch=$(git -C "$path" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 0
+  tracking=$(git -C "$path" for-each-ref --format='%(upstream:track)' "refs/heads/$branch" 2>/dev/null) || return 0
+  [[ "$tracking" == *"ahead "* ]]
+}
 
-  git_dir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-  [ -f "$git_dir/wt-start-commit" ] || return 1
-  IFS= read -r start_commit < "$git_dir/wt-start-commit" || return 1
-  git -C "$path" cat-file -e "${start_commit}^{commit}" 2>/dev/null || return 1
-  candidate_head=$(git -C "$path" rev-parse --verify -q 'HEAD^{commit}') || return 1
-  # Count commits absent from the initial HEAD, including after a rebase.
-  [ -n "$(git -C "$path" rev-list --max-count=1 "$start_commit..$candidate_head" 2>/dev/null)" ]
+worktree_is_merged_upstream() {
+  local path="$1" prs="$2" head
+  head=$(git -C "$path" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null) || return 1
+  printf '%s\n' "$prs" | awk -F '\t' -v head="$head" '
+    $6 == "MERGED" && $7 == head { found=1 }
+    END { exit !found }
+  '
+}
+
+worktree_cleanup_status() {
+  # Classify current local state without fetching. Both collection and removal
+  # use this policy; the caller decides whether to refresh missing PR evidence.
+  local path="$1" root="$2" merged_only="$3" target_commit="$4" prs="$5" branch
+  if [ "$path" = "$root" ]; then
+    echo root
+    return
+  fi
+  if ! worktree_is_clean "$path"; then
+    echo dirty
+    return
+  fi
+  if [ "$merged_only" != 1 ]; then
+    echo eligible
+    return
+  fi
+  branch=$(git -C "$path" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ -n "$branch" ] && worktree_is_ahead_of_upstream "$path"; then
+    echo ahead
+  elif worktree_is_merged_to "$path" "$target_commit" || {
+    [ -n "$branch" ] && worktree_is_merged_upstream "$path" "$prs"
+  }; then
+    echo eligible
+  else
+    echo unmerged
+  fi
 }
 
 print_clean_skips() {
@@ -493,16 +523,22 @@ print_clean_skips() {
     echo "Skipped clean unmerged worktrees:"
     printf '  %s\n' "${unmerged_displays[@]}"
   fi
-  if [ "${#no_commits_displays[@]}" -gt 0 ]; then
-    echo "Skipped clean worktrees with no recorded commits since creation:"
-    printf '  %s\n' "${no_commits_displays[@]}"
+  if [ "${#ahead_displays[@]}" -gt 0 ]; then
+    echo "Skipped clean worktrees ahead of upstream:"
+    printf '  %s\n' "${ahead_displays[@]}"
+  fi
+  if [ "${#changed_displays[@]}" -gt 0 ]; then
+    echo "Skipped worktrees no longer eligible for cleanup:"
+    printf '  %s\n' "${changed_displays[@]}"
   fi
 }
 
 clean_worktrees() {
-  local root no_confirm=0 clean_requested=0 merged_only=0 merged_rev="" merged_target merged_target_commit
-  local arg flags ch reply path branch sha display failed=0 i cleanup_target="" selected_path=""
-  local -a clean_paths clean_displays dirty_displays unmerged_displays no_commits_displays failed_displays removed_displays
+  local root no_confirm=0 clean_requested=0 merged_only=1 merged_target_commit='' interactive=0
+  local arg flags ch reply path display failed=0 i cleanup_target="" selected_path=""
+  local cleanup_prs='' refreshed_prs=0 cleanup_status
+  local -a clean_paths clean_displays dirty_displays unmerged_displays failed_displays removed_displays
+  local -a ahead_displays changed_displays
 
   while [ "$#" -gt 0 ]; do
     arg="$1"
@@ -522,28 +558,11 @@ clean_worktrees() {
       --force)
         no_confirm=1
         ;;
-      --merged=*)
-        merged_only=1
-        if [ -n "$merged_rev" ]; then
-          clean_usage
-          return 2
-        fi
-        merged_rev=${arg#--merged=}
-        if [ -z "$merged_rev" ]; then
-          echo "Invalid --merged target: " >&2
-          return 2
-        fi
+      --all)
+        merged_only=0
         ;;
-      --merged)
-        merged_only=1
-        if [ "$#" -gt 0 ] && is_merged_rev_token "${1:-}"; then
-          if [ -n "$merged_rev" ]; then
-            clean_usage
-            return 2
-          fi
-          merged_rev="$1"
-          shift
-        fi
+      --interactive)
+        interactive=1
         ;;
       -*)
         flags=${arg#-}
@@ -552,7 +571,7 @@ clean_worktrees() {
           return 2
         }
         case "$flags" in
-          *[!cfm]*)
+          *[!cfai]*)
             clean_usage
             return 2
             ;;
@@ -562,13 +581,10 @@ clean_worktrees() {
           case "$ch" in
             c) clean_requested=1 ;;
             f) no_confirm=1 ;;
-            m) merged_only=1 ;;
+            a) merged_only=0 ;;
+            i) interactive=1 ;;
           esac
         done
-        if [[ "$flags" == *m* ]] && [ -z "$merged_rev" ] && [ "$#" -gt 0 ] && is_merged_rev_token "${1:-}"; then
-          merged_rev="$1"
-          shift
-        fi
         ;;
       *)
         if [ -n "$cleanup_target" ] || [ -z "$arg" ]; then
@@ -584,6 +600,10 @@ clean_worktrees() {
     clean_usage
     return 2
   fi
+  if [ "$interactive" = 1 ] && ! command -v fzf >/dev/null 2>&1; then
+    echo "Interactive cleanup requires fzf." >&2
+    return 1
+  fi
 
   root=$(find_worktrees_root) || {
     echo "Could not find .worktrees directory or Git repository root." >&2
@@ -593,11 +613,10 @@ clean_worktrees() {
   cd "$root"
 
   if [ "$merged_only" = 1 ]; then
-    merged_target=${merged_rev:-HEAD}
-    merged_target_commit=$(git rev-parse --verify -q "${merged_target}^{commit}" 2>/dev/null || true)
+    merged_target_commit=$(git rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null || true)
     if [ -z "$merged_target_commit" ]; then
-      echo "Invalid --merged target: $merged_target" >&2
-      return 2
+      echo "Could not resolve root worktree HEAD." >&2
+      return 1
     fi
   fi
 
@@ -609,26 +628,32 @@ clean_worktrees() {
     fi
   fi
 
-  while IFS=$'\t' read -r path branch sha; do
+  if [ "$merged_only" = 1 ]; then
+    cleanup_prs=$(cached_prs "$root")
+  fi
+
+  while IFS=$'\t' read -r path _; do
     [ -n "$path" ] || continue
-    [ "$path" != "$root" ] || continue
     [ -z "$selected_path" ] || [ "$path" = "$selected_path" ] || continue
     is_existing_worktree_path "$path" || continue
     display=$(relative_path_for_root "$path" "$root")
-    if ! worktree_is_clean "$path"; then
-      dirty_displays+=("$display")
-      continue
+    cleanup_status=$(worktree_cleanup_status "$path" "$root" "$merged_only" "$merged_target_commit" "$cleanup_prs")
+    if [ "$cleanup_status" = unmerged ] && [ "$refreshed_prs" = 0 ] &&
+      git -C "$path" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
+      refresh_prs 2>/dev/null || true
+      cleanup_prs=$(cached_prs "$root")
+      refreshed_prs=1
+      cleanup_status=$(worktree_cleanup_status "$path" "$root" "$merged_only" "$merged_target_commit" "$cleanup_prs")
     fi
-    if [ "$merged_only" = 1 ] && ! worktree_is_merged_to "$path" "$merged_target_commit"; then
-      unmerged_displays+=("$display")
-      continue
-    fi
-    if [ "$merged_only" = 1 ] && ! worktree_has_commits_since_creation "$path"; then
-      no_commits_displays+=("$display")
-      continue
-    fi
-    clean_paths+=("$path")
-    clean_displays+=("$display")
+    case "$cleanup_status" in
+      eligible)
+        clean_paths+=("$path")
+        clean_displays+=("$display")
+        ;;
+      dirty) dirty_displays+=("$display") ;;
+      ahead) ahead_displays+=("$display") ;;
+      unmerged) unmerged_displays+=("$display") ;;
+    esac
   done < <(worktree_rows)
 
   if [ "${#clean_paths[@]}" -eq 0 ]; then
@@ -639,6 +664,10 @@ clean_worktrees() {
     fi
     print_clean_skips
     return 0
+  fi
+
+  if [ "$interactive" = 1 ]; then
+    pick_clean_worktrees || return $?
   fi
 
   if [ "$no_confirm" != 1 ]; then
@@ -665,6 +694,11 @@ clean_worktrees() {
   for i in "${!clean_paths[@]}"; do
     path=${clean_paths[$i]}
     display=${clean_displays[$i]}
+    cleanup_status=$(worktree_cleanup_status "$path" "$root" "$merged_only" "$merged_target_commit" "$cleanup_prs")
+    if [ "$cleanup_status" != eligible ]; then
+      changed_displays+=("$display")
+      continue
+    fi
     if git worktree remove "$path" >&2; then
       removed_displays+=("$display")
     else
@@ -799,7 +833,7 @@ list_candidates() {
 resolve_path() {
   local target="${1:-}"
   local existing_only="${2:-}"
-  local root worktree_dir worktree_parent path branch name head kind git_dir
+  local root worktree_dir worktree_parent path branch name head kind
   local pr_branch pr_status pr_mode
   local -a matched_paths matched_labels
 
@@ -851,8 +885,6 @@ resolve_path() {
     worktree_parent=$(dirname "$worktree_dir")
     mkdir -p "$worktree_parent"
     git worktree add "$worktree_dir" "$target" >&2 || return $?
-    git_dir=$(git -C "$worktree_dir" rev-parse --absolute-git-dir) || return $?
-    git -C "$worktree_dir" rev-parse --verify 'HEAD^{commit}' > "$git_dir/wt-start-commit" || return $?
     printf '%s\n' "$worktree_dir"
     return 0
   fi
@@ -940,11 +972,12 @@ format_rows() {
         split(rows[i], f, "\t")
         shown_path[i] = display_path(f[2])
         sha_label[i] = f[6]
-        targets[i] = f[1]
+        targets[i] = (f[13] == "" ? f[1] : f[13])
         branch_label[i] = (f[4] == "detached" ? "(detached)" : f[1])
         status_label[i] = (f[7] == "0" ? "[dirty]" : "")
         if (f[3] == "root") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") "[root]"
-        else if (f[8] == "0") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") "[unmerged]"
+        else if (f[8] == "1") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") "[merged]"
+        else if (f[12] == "1") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") "[merged upstream]"
         if (f[9] != "") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") f[9]
         if (f[10] != "") status_label[i] = status_label[i] (status_label[i] == "" ? "" : " ") f[10]
         if (length(sha_label[i]) > sha_width) sha_width = length(sha_label[i])
@@ -966,6 +999,53 @@ format_rows() {
   '
 }
 
+fzf_hyperlinks_enabled() {
+  local version
+  wt_hyperlinks_enabled || return 1
+  version=$(fzf --version 2>/dev/null || true)
+  [[ "$version" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+  [ "${BASH_REMATCH[1]}" -gt 0 ] || [ "${BASH_REMATCH[2]}" -ge 55 ]
+}
+
+pick_clean_worktrees() {
+  # clean_paths/clean_displays are the caller's eligible snapshot. The hidden
+  # IDs map back to it; picker output is never interpreted as a path or command.
+  local rows selection line key index i links=0 seen=$'\n'
+  local -a fzf_args selected_paths selected_displays
+  if fzf_hyperlinks_enabled; then
+    links=1
+    fzf_args+=(--ansi)
+  fi
+  rows=$(list_candidates | annotate_prs) || return 1
+  selection=$(awk -F '\t' 'BEGIN { OFS="\t" }
+    FILENAME == ARGV[1] { ids[$2]=$1; next }
+    $3 == "root" { $13="_root"; print; next }
+    $2 in ids { $13="clean-" ids[$2]; print }
+  ' <(
+    for i in "${!clean_paths[@]}"; do printf '%s\t%s\n' "$i" "${clean_paths[$i]}"; done
+  ) <(printf '%s\n' "$rows") | format_rows 1 "$links" |
+    awk -F '\t' '$1 != "_root"' |
+    fzf "${fzf_args[@]}" --multi --cycle --height=~50% --delimiter=$'\t' --with-nth=2.. \
+      --prompt='Clean worktrees> ' --info=inline \
+      --header='Tab: mark | Enter: choose | Esc: cancel') || return 130
+  [ -n "$selection" ] || return 130
+  while IFS= read -r line; do
+    key=${line%%$'\t'*}
+    index=${key#clean-}
+    if [[ "$key" != clean-* || ! "$index" =~ ^(0|[1-9][0-9]*)$ ]] || \
+      [ "${#index}" -gt 8 ] || [ "$index" -ge "${#clean_paths[@]}" ]; then
+      echo "Invalid worktree selection; nothing removed." >&2
+      return 1
+    fi
+    [[ "$seen" != *$'\n'"$key"$'\n'* ]] || continue
+    seen="$seen$key"$'\n'
+    selected_paths+=("${clean_paths[$index]}")
+    selected_displays+=("${clean_displays[$index]}")
+  done <<< "$selection"
+  clean_paths=("${selected_paths[@]}")
+  clean_displays=("${selected_displays[@]}")
+}
+
 pick_candidate() {
   local rows selection branch
 
@@ -976,15 +1056,11 @@ pick_candidate() {
   fi
 
   if command -v fzf >/dev/null 2>&1; then
-    local reload_command version links=0
+    local reload_command links=0
     local -a fzf_args
-    if wt_hyperlinks_enabled; then
-      version=$(fzf --version 2>/dev/null || true)
-      if [[ "$version" =~ ^([0-9]+)\.([0-9]+) ]] && \
-        { [ "${BASH_REMATCH[1]}" -gt 0 ] || [ "${BASH_REMATCH[2]}" -ge 55 ]; }; then
-        links=1
-        fzf_args+=(--ansi)
-      fi
+    if fzf_hyperlinks_enabled; then
+      links=1
+      fzf_args+=(--ansi)
     fi
     printf -v reload_command '%q __pr_fzf %s' "$WT_LIB_DIR/../wt" "$links"
     selection=$(printf '%s\n' "$rows" | format_rows 1 "$links" | fzf "${fzf_args[@]}" --height=~50% --delimiter=$'\t' --with-nth=2.. \
@@ -1099,13 +1175,15 @@ _wt() {
   }
 
   _wt_status_label() {
-    local kind="$1" clean="$2" merged="$3" tracking="$4" prs="$5"
+    local kind="$1" clean="$2" merged="$3" tracking="$4" prs="$5" merged_upstream="$6"
     REPLY=""
     [[ "$clean" != 0 ]] || REPLY="[dirty]"
     if [[ "$kind" == root ]]; then
       REPLY="${REPLY:+$REPLY }[root]"
-    elif [[ "$merged" == 0 ]]; then
-      REPLY="${REPLY:+$REPLY }[unmerged]"
+    elif [[ "$merged" == 1 ]]; then
+      REPLY="${REPLY:+$REPLY }[merged]"
+    elif [[ "$merged_upstream" == 1 ]]; then
+      REPLY="${REPLY:+$REPLY }[merged upstream]"
     fi
     [[ -z "$tracking" ]] || REPLY="${REPLY:+$REPLY }$tracking"
     [[ -z "$prs" ]] || REPLY="${REPLY:+$REPLY }$prs"
@@ -1115,27 +1193,34 @@ _wt() {
   cur="${words[CURRENT]}"
 
   if [[ "$cur" == -* ]]; then
-    option_values=(--latest --clean --merged --delete --move -l -c -f -m -d -M -cf -fc -cm -mc -cfm)
+    option_values=(--branch --clean --all --delete --move --force --latest --help --interactive --zsh-completion -b -c -a -d -M -f -l -h -i -cf -ca -cfa -ci -cif -cia -ciaf)
     option_labels=(
       "--branch  create and switch to a new branch"
-      "--clean   remove clean non-main worktrees after confirmation"
+      "--clean   remove eligible merged worktrees after confirmation"
+      "--all     with --clean, include every clean non-root worktree"
       "--delete  delete a branch and its worktree (clean and fully merged)"
       "--move    rename a branch and move its worktree"
       "--force   skip confirmation when used with -c/--clean"
       "--latest  switch to the latest local branch by committer date"
-      "--merged  with -c/--clean, remove only worktrees merged into an optional rev"
+      "--help    show help"
+      "--interactive with --clean, select worktrees with fzf multi-select"
+      "--zsh-completion print the zsh completion definition"
       "-b        create and switch to a new branch"
+      "-c        remove eligible merged worktrees after confirmation"
+      "-a        with -c/--clean, include every clean non-root worktree"
       "-d        delete a branch and its worktree (clean and fully merged)"
       "-M        rename a branch and move its worktree"
-      "-c        remove clean non-main worktrees after confirmation"
       "-f        skip confirmation when used with -c/--clean"
       "-l        switch to the latest local branch by committer date"
-      "-m        with -c/--clean, shorthand for --merged"
-      "-cf       remove clean non-main worktrees without confirmation"
-      "-fc       remove clean non-main worktrees without confirmation"
-      "-cm       remove clean merged non-main worktrees after confirmation"
-      "-mc       remove clean merged non-main worktrees after confirmation"
-      "-cfm      remove clean merged non-main worktrees without confirmation"
+      "-h        show help"
+      "-i        with -c/--clean, select worktrees with fzf multi-select"
+      "-cf       remove eligible merged worktrees without confirmation"
+      "-ca       remove all clean non-root worktrees after confirmation"
+      "-cfa      remove all clean non-root worktrees without confirmation"
+      "-ci       select eligible merged worktrees to clean"
+      "-cif      select eligible merged worktrees; skip confirmation"
+      "-cia      select from all clean non-root worktrees"
+      "-ciaf     select from all clean non-root worktrees; skip confirmation"
     )
     compadd -Q -V wt-options -d option_labels -l -- "${option_values[@]}"
     return
@@ -1175,7 +1260,7 @@ _wt() {
     branch_width=${#branch_label}
     (( sha_width > max_sha_width )) && max_sha_width=$sha_width
     (( branch_width > max_branch_width )) && max_branch_width=$branch_width
-    _wt_status_label "$fields[3]" "$fields[7]" "$fields[8]" "$fields[9]" "$fields[10]"
+    _wt_status_label "$fields[3]" "$fields[7]" "$fields[8]" "$fields[9]" "$fields[10]" "$fields[12]"
     (( ${#REPLY} > max_status_width )) && max_status_width=${#REPLY}
   done <<< "$wt_rows"
 
@@ -1195,7 +1280,7 @@ _wt() {
     display_path="$REPLY"
     branch_label="$branch"
     [[ "$fields[4]" != detached ]] || branch_label="(detached)"
-    _wt_status_label "$kind" "$clean_status" "$merged_status" "$fields[9]" "$fields[10]"
+    _wt_status_label "$kind" "$clean_status" "$merged_status" "$fields[9]" "$fields[10]" "$fields[12]"
     status_label="$REPLY"
 
     if [[ -z "$display_path" ]]; then
@@ -1313,6 +1398,10 @@ case "${1:-}" in
       exit $?
     elif is_clean_option_token "${1:-}"; then
       clean_worktrees "$@"
+    elif [[ "$1" == -* ]]; then
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
     else
       resolve_path "$1"
     fi

@@ -102,8 +102,8 @@ _wt
             statuses.append("[dirty]")
         if kind == "root":
             statuses.append("[root]")
-        elif merged == "0":
-            statuses.append("[unmerged]")
+        elif merged == "1":
+            statuses.append("[merged]")
         if tracking:
             statuses.append(tracking)
         status = " ".join(statuses)

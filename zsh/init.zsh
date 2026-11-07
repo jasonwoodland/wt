@@ -1,9 +1,9 @@
 # Source once from .zshrc after adding wt to PATH. No request runs at startup.
 autoload -Uz add-zle-hook-widget
-# The completion loader installs generated code into the shell. Reload it when
-# this setup is sourced again, so an existing shell picks up wt updates too.
-unfunction _wt 2>/dev/null || true
-autoload -Uz _wt
+# Reload the wrapper and generated completion so existing shells pick up wt
+# updates when this setup is sourced again.
+unfunction wt _wt 2>/dev/null || true
+autoload -Uz wt _wt
 if (( $+functions[compdef] )); then
   compdef _wt wt
 fi

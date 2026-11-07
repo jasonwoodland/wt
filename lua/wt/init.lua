@@ -319,7 +319,7 @@ local function parse_rows(output)
 
 	for line in output:gmatch("[^\n]+") do
 		local fields = vim.split(line, "\t", { plain = true })
-		local branch, path, kind, label, sort, sha, clean, merged, tracking, prs, urls = unpack(fields)
+		local branch, path, kind, label, sort, sha, clean, merged, tracking, prs, urls, merged_upstream = unpack(fields)
 		if #fields >= 6 and branch ~= "" then
 			local pr_urls = {}
 			for url in (urls or ""):gmatch("%S+") do
@@ -342,6 +342,7 @@ local function parse_rows(output)
 				sha = sha,
 				clean = clean == "1",
 				merged = merged == "1",
+				merged_upstream = merged_upstream == "1",
 				tracking = tracking or "",
 				prs = prs or "",
 				pr_urls = pr_urls,
@@ -369,8 +370,10 @@ local function status_label(entry)
 	end
 	if entry.kind == "root" then
 		table.insert(labels, "[root]")
-	elseif entry.kind ~= "branch" and not entry.merged then
-		table.insert(labels, "[unmerged]")
+	elseif entry.kind ~= "branch" and entry.merged then
+		table.insert(labels, "[merged]")
+	elseif entry.kind ~= "branch" and entry.merged_upstream then
+		table.insert(labels, "[merged upstream]")
 	end
 	if entry.tracking and entry.tracking ~= "" then
 		table.insert(labels, entry.tracking)

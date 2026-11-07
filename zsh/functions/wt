@@ -57,7 +57,7 @@ if [[ "$target" == --move || "$target" == -M ]]; then
   return 0
 fi
 
-if [[ "$target" == --* || "$target" == -h || "$target" =~ '^-[bcdfmM]+$' ]]; then
+if [[ "$target" == -* ]]; then
   (
     builtin cd -q / || exit 1
     WT_CWD="$wt_cwd" command wt "$@"

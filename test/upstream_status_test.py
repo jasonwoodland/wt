@@ -104,7 +104,8 @@ _wt
             for label in ("[ahead 1]", "[behind 1]", "[no upstream]", "[gone]"):
                 assert (label in display[branch]) == (label in status), (branch, display[branch])
         assert "[dirty]" in display["diverged"]
-        assert "[unmerged]" not in display["diverged"]  # Same commit as root.
+        assert "[merged]" in display["diverged"]  # Same commit as root.
+        assert "[unmerged]" not in display["diverged"]
         assert "[root]" in display["main"]
         assert "[no upstream]" not in display[str(detached)]
     # Updating the cached ref removes the ahead label without any fetch.

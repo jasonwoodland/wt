@@ -20,17 +20,17 @@ Arguments:
   .                         Switch to the repo root that owns .worktrees.
 
 Options:
+  -a, --all                 With --clean, include all clean worktrees.
+                            Skip merge and ahead safeguards.
   -b, --branch <branch>      Create a branch from the root HEAD and switch to it.
-  -c, --clean [<target>]     Remove clean non-main worktrees after confirmation.
+  -c, --clean [<target>]     Remove eligible merged worktrees after confirmation.
                             Optionally select one by branch, substring, or path.
   -d, --delete <branch>      Remove the clean worktree, then delete the branch
                             if Git considers it fully merged.
   -f, --force                With --clean, skip confirmation.
   -h, --help                 Show this help.
+  -i, --interactive         With --clean, select worktrees using fzf multi-select.
   -l, --latest               Switch to the latest local branch by committer date.
-  -m, --merged [<rev>]       With --clean, only remove worktrees merged into <rev>.
-                            Requires commits since creation by wt.
-                            Defaults to the root worktree HEAD.
   -M, --move [<old>] <new>    Rename a branch and move its worktree, if one exists.
                             <old> defaults to the current branch.
       --zsh-completion      Print the zsh completion definition.
@@ -38,8 +38,9 @@ Options:
 Exact branches take priority. Otherwise, a literal, case-sensitive substring
 must match exactly one existing worktree; multiple matches are listed as an error.
 
-Cleanup never removes dirty worktrees, even with --force. The short cleanup
-options -c, -f, and -m can be combined.
+Cleanup skips worktrees ahead of upstream and requires a merge into root HEAD
+or a merged PR matching HEAD. --all skips these checks.
+Dirty worktrees and root are always protected. Combine -c, -f, -a, and -i as needed.
 
 Examples:
   wt feature/login          Switch to an existing branch's worktree.
@@ -47,12 +48,14 @@ Examples:
   wt login                  Switch to the worktree matching login.
   wt -b feature/search      Create a branch and switch to its worktree.
   wt -M feature/find        Rename the current branch and move its worktree.
-  wt -cm                    Remove clean worktrees merged into the root HEAD.
-  wt -cf 320                Remove the clean worktree matching 320.
-  wt -cm main 320           Remove matching worktree if merged into main.
-  wt -cm -- 320             Use root HEAD as the merge reference for matching 320.
-  wt -cfm                   Do the same without confirmation.
-  wt -c --merged main       Remove clean worktrees merged into main.
+  wt -c                     Remove eligible merged worktrees after confirmation.
+  wt -cf                    Do the same without confirmation.
+  wt -cf 320                Clean matching worktree if it passes safeguards.
+  wt -ca                    Remove all clean worktrees after confirmation.
+  wt -cfa                   Remove all clean worktrees without confirmation.
+  wt -ci                    Pick eligible worktrees to clean with fzf.
+  wt -ciaf                  Pick from all clean worktrees; skip confirmation.
+  wt -c --all login         Remove matching clean worktree after confirmation.
 
 The zsh function changes the current shell directory. When called directly,
 the executable prints the destination path for navigation commands.
@@ -88,7 +91,10 @@ does not identify a local branch safely. Cleanup and deletion retain their local
 targeting rules.
 
 fzf and Telescope open immediately with local rows and the previous PR snapshot,
-then fetch open PRs once and refresh the picker. Plain listings and `wt __list`
+then fetch open PRs and merged PRs associated with current worktree tips and
+refresh the picker. Tip lookups are deduplicated by commit and batched with the
+open-PR request (up to 30 unique tips per batch), avoiding a scan of all merged
+PR history. Plain listings and `wt __list`
 read the snapshot without contacting GitHub. Successful snapshots are stored in
 the shared Git directory, so linked worktrees share them; changing remotes or
 `GH_REPO`/`GH_HOST` invalidates the snapshot. Failed refreshes preserve the previous
@@ -120,11 +126,11 @@ their next successful refresh.
 
 ## Telescope picker
 
-The Telescope, fzf, and zsh completion pickers list existing worktrees and local branches as `{sha}  {branch name}  [dirty] [unmerged]  {relative worktree path}`. `[dirty]` means the worktree has tracked or untracked changes; `[unmerged]` means a linked worktree has commits that are not reachable from the root worktree's `HEAD`. Clean worktrees with no commits ahead of root show neither of these labels, including branches at the same commit as root or already merged into it. The root worktree shows `[root]` instead of a merge status, alongside `[dirty]` when applicable. Branch-only rows omit cleanliness and merge labels. The path is shown only for existing worktrees, including worktrees outside `.worktrees`; branch-only rows omit the path. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
+The Telescope, fzf, and zsh completion pickers list existing worktrees and local branches as `{sha}  {branch name}  [dirty] [merged | merged upstream]  {relative worktree path}`. `[dirty]` means the worktree has tracked or untracked changes. `[merged]` means its current commit is contained in the local root worktree's `HEAD`, including worktrees at the same commit as root. Otherwise, `[merged upstream]` means GitHub reports a merged PR whose head exactly matches the worktree's current commit. This recognizes squash/rebase merges and remote merges before local root is updated. New local commits invalidate that evidence immediately. These labels describe committed work; dirty files still show `[dirty]`. `[merged]` takes priority when both checks pass; neither label appears without positive evidence. The root worktree shows `[root]` instead of a merge status, alongside `[dirty]` when applicable. Branch-only rows omit cleanliness and merge labels. The path is shown only for existing worktrees, including worktrees outside `.worktrees`; branch-only rows omit the path. Selecting a branch without a worktree creates `.worktrees/<branch>` first.
 
 Branch rows also show upstream status: `[ahead N]` for local commits absent from the configured upstream, `[behind N]` for upstream commits absent locally, or both when histories diverge. `[no upstream]` means no tracking branch is configured; `[gone]` means the configured upstream ref is missing. Up-to-date branches show no upstream label. These labels apply to the root, linked worktrees, and branch-only rows, and compare locally cached refs without fetching or contacting the remote.
 
-Detached worktrees appear as `{sha}  (detached)  [dirty] [unmerged]  {relative worktree path}` in both pickers and shell completion, with the same status rules and no upstream labels. Selecting one opens its existing directory without creating or attaching a branch. Completion inserts its absolute path; you can also use `wt /absolute/path/to/worktree` directly. With `branch.sort` configured, detached worktrees follow branch-attached worktrees and precede branch-only rows.
+Detached worktrees appear as `{sha}  (detached)  [dirty] [merged]  {relative worktree path}` in both pickers and shell completion, with the same local merge check and no remote PR or tracking labels. Selecting one opens its existing directory without creating or attaching a branch. Completion inserts its absolute path; you can also use `wt /absolute/path/to/worktree` directly. With `branch.sort` configured, detached worktrees follow branch-attached worktrees and precede branch-only rows.
 
 ```lua
 require("wt").setup({ key = "<Space>w" })
@@ -147,9 +153,27 @@ require("wt").setup({ key = "<Space>w" })
 
 `wt --latest` and `wt -l` switch to the local branch/worktree with the newest committer date, equivalent to selecting the first branch from `git for-each-ref --sort=-committerdate --count=1 --format='%(refname:short)' refs/heads` and resolving it through `wt <branch>`.
 
-`<C-d>` and `wt --clean` only remove clean worktrees (no untracked files and no modification in tracked files). Add `--merged [<rev>]` or `-m` with `wt -c` to remove only clean worktrees whose `HEAD` is merged into `<rev>` and which have commits since their creation by `wt`; when `<rev>` is omitted, the root worktree `HEAD` is used. `wt` records the initial commit in the worktree's private Git metadata when creating it. Untouched worktrees and existing worktrees without that record are preserved by merged cleanup, even if root has advanced past them. Moving a worktree preserves the record; recreating one starts a new record. Commits already present when `wt` creates a worktree do not count as work done in that worktree. If the recorded commit is no longer available, merged cleanup preserves the worktree. The `[unmerged]` listing label still describes commits missing from root independently of this creation record. `wt -cf` removes all clean linked worktrees regardless of the record. `wt -cf` and `wt -cfm` skip confirmation but still do not force dirty worktree removal.
+`<C-d>` removes the selected clean worktree. CLI cleanup with `wt -c` removes eligible merged worktrees after confirmation; `wt -cf` applies the same safeguards without confirmation. Both require clean worktrees (no untracked files or modifications in tracked files).
 
-Cleanup accepts one optional target using the same exact-branch and literal substring matching as navigation, or a registered absolute worktree path. For example, `wt -cf 320` removes only the clean worktree matching `320`; it leaves the branch intact. Ambiguous or missing matches fail without removing anything, branch-only targets never create a worktree, and root cannot be removed. Without a target, cleanup considers all linked worktrees. With merged cleanup, the argument immediately following `-m`, `--merged`, or a combined flag containing `m` is the merge reference: `wt -cm main 320` targets `320` against `main`, and `wt -cm main` considers all linked worktrees against `main`. Use `wt -cm -- 320` to target `320` against root HEAD, or `wt -cf --merged=main 320` to specify the reference explicitly. Targeted cleanup retains the same cleanliness and recorded-commit requirements.
+Default cleanup accepts either `[merged]` or `[merged upstream]`, but skips every `[ahead N]` worktree, including locally merged and diverged branches. Upstream-only cleanup requires a merged PR whose head exactly matches the worktree's current commit. Tracking comparisons use cached refs; `git fetch` can resolve a stale ahead label. Worktrees without a tracking ref may qualify through local merge or exact merged-PR evidence. Cached evidence is reused; if missing, cleanup attempts one PR refresh and preserves upstream-only candidates when confirmation of the merge is unavailable. Git refs are never fetched automatically. Root is protected and branches are retained.
+
+Use `-a` / `--all` to include every clean worktree: `wt -ca` confirms first, while `wt -cfa` skips confirmation. This bypasses merge and ahead checks, while still protecting dirty worktrees and root and retaining all branches. This is the behavior previously provided by `wt -cf`. `--all` requires `--clean` / `-c`; the flags can be combined in any order.
+
+Add `-i` / `--interactive` to select which eligible worktrees to clean with fzf.
+`wt -ci` offers worktrees passing the default safeguards; `wt -cia` offers all
+clean non-root worktrees. Tab / Shift-Tab toggle selections, Enter accepts the
+marked worktrees (or the focused one when nothing is marked), and Esc cancels.
+Rows show branches, PRs, statuses, and relative paths. The final confirmation
+lists only the selected worktrees; `wt -cif` or `wt -ciaf` skips that confirmation.
+Eligibility is rechecked before removal, including changes made while the picker
+is open. Interactive cleanup requires fzf and does not fall back to cleaning
+everything when it is unavailable.
+
+Guarded cleanup checks eligibility again immediately before removal, including after the confirmation prompt. `-f` only skips confirmation. There is no merge-filter flag or revision argument; safeguards apply by default.
+
+Cleanup eligibility depends on current Git state, regardless of how the worktree was created. Clean merged worktrees qualify even if created manually, created by an older version of `wt`, or unchanged since creation. Old `wt-start-commit` metadata is ignored.
+
+Cleanup accepts one optional target using the same exact-branch and literal substring matching as navigation, or a registered absolute worktree path. `wt -cf 320` removes the matching worktree only if it passes the default safeguards; `wt -cfa 320` removes it if clean regardless of merge status. Both leave the branch intact. Ambiguous or missing matches fail without removing anything, branch-only targets never create a worktree, and root cannot be removed. Without a target, cleanup considers all linked worktrees. Every positional argument is a cleanup target; extra targets are rejected.
 
 ## Appendix
 
